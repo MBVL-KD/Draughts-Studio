@@ -4,6 +4,7 @@
   "description": "",
   "main": "index.js",
   "scripts": {
+    "start": "node src/index.js",
     "dev": "nodemon --watch src --ext js,ts,json src/index.js",
     "clean:import-data": "node src/scripts/cleanImportStudioData.js",
     "repair:imported-puzzles": "ts-node src/scripts/repairImportedPuzzleMismatches.ts",
@@ -17,7 +18,9 @@
     "cors": "^2.8.6",
     "dotenv": "^17.3.1",
     "express": "^5.2.1",
-    "mongoose": "^9.3.3"
+    "mongoose": "^9.3.3",
+    "ts-node": "^10.9.2",
+    "typescript": "^6.0.2"
   },
   "devDependencies": {
     "nodemon": "^3.1.14"
