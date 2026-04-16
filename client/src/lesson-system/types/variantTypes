@@ -1,0 +1,28 @@
+// client/src/lesson-system/types/variantTypes.ts
+
+export type VariantRuntimeConfig = {
+  variantId: string;
+
+  boardSize: number;
+
+  mustCapture: boolean;
+
+  backwardCaptureForMen: boolean;
+
+  kingMoves: "short" | "flying";
+
+  capturePriority:
+    | "free"
+    | "longest"
+    | "most_pieces"
+    | "most_kings";
+
+  promotion:
+    | "reach"
+    | "pass_through";
+
+  drawRules?: {
+    repetition?: number;
+    noProgress?: number;
+  };
+};

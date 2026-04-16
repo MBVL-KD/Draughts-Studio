@@ -1,0 +1,100 @@
+import type { SourceDocument } from "../types/analysisTypes";
+
+export const sampleSourceDocument: SourceDocument = {
+  id: "source-1",
+  kind: "analysis",
+  format: "manual",
+  title: { values: { en: "Sample source", nl: "Voorbeeldbron" } },
+  description: { values: { en: "Temporary test source", nl: "Tijdelijke testbron" } },
+
+  variantId: "international",
+  rulesetId: "classic",
+
+  initialFen: "W:W31,32,33,34:B1,2,3,4",
+  rootNodeId: "root",
+
+  nodes: [
+    {
+      id: "root",
+      parentId: null,
+      childrenIds: ["n1"],
+      plyIndex: 0,
+      fenAfter: "W:W31,32,33,34:B1,2,3,4",
+      isMainline: true,
+    },
+    {
+      id: "n1",
+      parentId: "root",
+      childrenIds: ["n2", "v1"],
+      plyIndex: 1,
+      isMainline: true,
+      move: {
+        notation: "31-26",
+        side: "W",
+        from: 31,
+        to: 26,
+        moveNumber: 1,
+      },
+      fenAfter: "B:W26,32,33,34:B1,2,3,4",
+      comment: { values: { en: "Main line first move" } },
+      glyphs: ["!"],
+    },
+    {
+      id: "n2",
+      parentId: "n1",
+      childrenIds: ["n3"],
+      plyIndex: 2,
+      isMainline: true,
+      move: {
+        notation: "20-25",
+        side: "B",
+        from: 20,
+        to: 25,
+        moveNumber: 1,
+      },
+      fenAfter: "W:W26,32,33,34:B1,2,3,25",
+      comment: { values: { en: "Black replies in the main line" } },
+    },
+    {
+      id: "n3",
+      parentId: "n2",
+      childrenIds: [],
+      plyIndex: 3,
+      isMainline: true,
+      move: {
+        notation: "34-30",
+        side: "W",
+        from: 34,
+        to: 30,
+        moveNumber: 2,
+      },
+      fenAfter: "B:W26,30,32,33:B1,2,3,25",
+      comment: { values: { en: "White continues" } },
+      teaching: {
+        isCritical: true,
+      },
+    },
+    {
+      id: "v1",
+      parentId: "n1",
+      childrenIds: [],
+      plyIndex: 2,
+      isMainline: false,
+      variationOf: "n2",
+      move: {
+        notation: "17-21",
+        side: "B",
+        from: 17,
+        to: 21,
+        moveNumber: 1,
+      },
+      fenAfter: "W:W26,32,33,34:B1,2,3,21",
+      comment: { values: { en: "Alternative variation" } },
+      glyphs: ["?!"],
+    },
+  ],
+
+  tags: ["test"],
+  createdAt: new Date().toISOString(),
+  updatedAt: new Date().toISOString(),
+};
