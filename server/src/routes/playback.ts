@@ -58,6 +58,12 @@ function handleRouteError(res: Res, error: unknown) {
   res.status(500).json({ message: "Internal server error" });
 }
 
+/** Same numeric source as `GET /api/books/:bookId` → `item.revision` (BookModel). */
+function revisionFromBook(book: unknown): number | undefined {
+  const r = (book as { revision?: unknown } | null | undefined)?.revision;
+  return typeof r === "number" && Number.isFinite(r) ? r : undefined;
+}
+
 function hasAuthoringAskSequence(lesson: unknown, stepId: string): boolean {
   const bundle = (lesson as { authoringV2?: unknown })?.authoringV2 as
     | {
@@ -178,6 +184,7 @@ playbackRouter.get("/:stepId/playback", async (req: Req, res: Res) => {
       navigation,
     });
 
+    const revision = revisionFromBook(stepRef.book);
     res.json({
       item: payload,
       meta: {
@@ -185,6 +192,7 @@ playbackRouter.get("/:stepId/playback", async (req: Req, res: Res) => {
         lessonId: stepRef.lessonId,
         stepId: stepRef.stepId,
         language: requestedLanguage,
+        ...(revision !== undefined ? { revision, bookRevision: revision } : {}),
       },
     });
   } catch (error) {
@@ -275,6 +283,7 @@ playbackRouter.get(
         navigation,
       });
 
+      const revision = revisionFromBook(lessonRef.book);
       res.json({
         item: payload,
         meta: {
@@ -282,6 +291,7 @@ playbackRouter.get(
           lessonId,
           stepId,
           language: requestedLanguage,
+          ...(revision !== undefined ? { revision, bookRevision: revision } : {}),
         },
       });
     } catch (error) {
