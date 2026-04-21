@@ -1,5 +1,5 @@
 import express from "express";
-import { findStepRef, getLessonByIdWithinBook } from "../repositories/bookRepository";
+import { findStepRefWithCurriculumFallback, getLessonRefWithCurriculumFallback } from "../services/playbackContentOwner";
 import { getSourceById } from "../repositories/sourceRepository";
 import { buildPlaybackPayload } from "../services/playbackService";
 import { validateStepForRuntimeExport } from "../validation/saveValidators";
@@ -94,10 +94,11 @@ playbackRouter.get("/:stepId/playback", async (req: Req, res: Res) => {
     const requiredLanguages = resolveRequiredLanguages(req);
     const stepId = req.params.stepId;
 
-    const stepRef = await findStepRef(owner, stepId);
-    if (!stepRef) {
+    const resolved = await findStepRefWithCurriculumFallback(owner, stepId);
+    if (!resolved) {
       throw new NotFoundError("Step not found");
     }
+    const { stepRef, contentOwner } = resolved;
 
     const guardBookId =
       typeof req.query.bookId === "string" ? req.query.bookId.trim() : "";
@@ -128,7 +129,7 @@ playbackRouter.get("/:stepId/playback", async (req: Req, res: Res) => {
       typeof stepRef.step?.sourceRef?.sourceId === "string"
         ? stepRef.step.sourceRef.sourceId
         : undefined;
-    const source = sourceId ? await getSourceById(owner, sourceId) : undefined;
+    const source = sourceId ? await getSourceById(contentOwner, sourceId) : undefined;
 
     const lessonAnyPre = (stepRef.lesson ?? {}) as Record<string, unknown>;
     const authoringBundlePre = lessonAnyPre.authoringV2 as
@@ -228,8 +229,9 @@ playbackRouter.get(
           },
         ]);
       }
-      const lessonRef = await getLessonByIdWithinBook(owner, bookId, lessonId);
-      if (!lessonRef?.lesson) throw new NotFoundError("Lesson not found");
+      const resolvedLesson = await getLessonRefWithCurriculumFallback(owner, bookId, lessonId);
+      if (!resolvedLesson) throw new NotFoundError("Lesson not found");
+      const { lessonRef, contentOwner } = resolvedLesson;
       const lesson = lessonRef.lesson as Record<string, unknown>;
       const steps = ((lesson.steps ?? []) as Array<{ id?: string; stepId?: string }>).filter(Boolean);
       const step = steps.find((s) => getStepAppId(s) === stepId);
@@ -239,7 +241,7 @@ playbackRouter.get(
         typeof (step as { sourceRef?: { sourceId?: string } }).sourceRef?.sourceId === "string"
           ? (step as { sourceRef: { sourceId: string } }).sourceRef.sourceId
           : undefined;
-      const source = sourceId ? await getSourceById(owner, sourceId) : undefined;
+      const source = sourceId ? await getSourceById(contentOwner, sourceId) : undefined;
       const authoringBundlePre = lesson.authoringV2 as { stepsById?: Record<string, unknown> } | undefined;
       const authoringStepForValidate =
         (authoringBundlePre?.stepsById?.[stepId] as Record<string, unknown> | undefined) ?? undefined;
