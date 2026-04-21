@@ -121,7 +121,6 @@ export function validateLessonStepRuntimeExportReadiness(
   const warnings: AuthoringValidationIssue[] = [];
 
   pushRequiredLocalized(step.title, `${pathPrefix}.title`, langs, errors);
-  pushRequiredLocalized(step.prompt, `${pathPrefix}.prompt`, langs, errors);
   if (requiresLocalizedFeedbackForRuntimeExport({ step, authoringStep })) {
     pushRequiredLocalized(step.feedback?.correct, `${pathPrefix}.feedback.correct`, langs, errors);
     pushRequiredLocalized(step.feedback?.incorrect, `${pathPrefix}.feedback.incorrect`, langs, errors);

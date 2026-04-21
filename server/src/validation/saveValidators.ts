@@ -215,7 +215,8 @@ export function validateStepForRuntimeExport(
   const authoringStep = options?.authoringStep;
 
   issues.push(...collectLocalizedRequiredIssues(step.title, "step.title", options));
-  issues.push(...collectLocalizedRequiredIssues(step.prompt, "step.prompt", options));
+  // Legacy `step.prompt` is still emitted on playback payloads but may be empty when
+  // copy lives on authoring timeline moments (introText body, interaction.prompt, etc.).
   if (requiresLocalizedFeedbackForRuntimeExport({ step, authoringStep })) {
     issues.push(...collectLocalizedRequiredIssues(step.feedback?.correct, "step.feedback.correct", options));
     issues.push(...collectLocalizedRequiredIssues(step.feedback?.incorrect, "step.feedback.incorrect", options));
