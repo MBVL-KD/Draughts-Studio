@@ -115,6 +115,23 @@ const PlaybackHintSchema = z.object({
   expectedTo: z.number().int().optional(),
 });
 
+/** Localized copy resolved for `lang` plus optional full map for runtime language switches. */
+const LocalizedPlaybackFieldSchema = z.object({
+  display: z.string(),
+  values: z.record(z.string(), z.string()).optional(),
+});
+
+/** One authoring ministep (`StepMoment`); extra keys allowed (interaction, overlays, …). */
+const AuthoringTimelineMomentPlaybackSchema = z
+  .object({
+    id: z.string(),
+    type: z.string(),
+    title: LocalizedPlaybackFieldSchema.optional(),
+    body: LocalizedPlaybackFieldSchema.optional(),
+    caption: LocalizedPlaybackFieldSchema.optional(),
+  })
+  .catchall(z.unknown());
+
 export const PlaybackPayloadSchema = z.object({
   payloadType: z.literal("lesson-step-playback"),
   payloadVersion: z.union([z.literal(1), z.literal(2)]),
@@ -141,6 +158,12 @@ export const PlaybackPayloadSchema = z.object({
   previousStepId: z.string().nullable().optional(),
   nextStepId: z.string().nullable().optional(),
   hint: PlaybackHintSchema.optional(),
+  /** V2 authoring step id when timeline block is present. */
+  authoringStepId: z.string().optional(),
+  /** V2 step kind: explain, demo, tryMove, … */
+  authoringStepKind: z.string().optional(),
+  /** Ordered ministeps for Roblox (mirrors `authoringV2.stepsById[id].timeline`). */
+  authoringTimeline: z.array(AuthoringTimelineMomentPlaybackSchema).optional(),
 });
 
 type PlaybackPayloadShape = z.infer<typeof PlaybackPayloadSchema>;

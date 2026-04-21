@@ -93,6 +93,21 @@ export type PlaybackHintPayload = {
   expectedTo?: number;
 };
 
+/** Localized string for current `lang` plus optional full map (Studio playback). */
+export type LocalizedPlaybackField = {
+  display: string;
+  values?: Record<string, string>;
+};
+
+/** One ministep from `authoringV2` timeline as returned by Studio GET …/playback. */
+export type AuthoringTimelineMomentPlayback = {
+  id: string;
+  type: string;
+  title?: LocalizedPlaybackField;
+  body?: LocalizedPlaybackField;
+  caption?: LocalizedPlaybackField;
+} & Record<string, unknown>;
+
 export type PuzzleScanPlaybackPayload = {
   scanFallbackEnabled: boolean;
   strictAuthoredOnly: boolean;
@@ -133,5 +148,9 @@ export type LessonStepPlaybackPayload = {
   puzzleScan?: PuzzleScanPlaybackPayload;
   navigation?: PlaybackNavigationPayload;
   hint?: PlaybackHintPayload;
+  /** Present when authoring step has a `timeline` array (may be empty). */
+  authoringStepId?: string;
+  authoringStepKind?: string;
+  authoringTimeline?: AuthoringTimelineMomentPlayback[];
 };
 

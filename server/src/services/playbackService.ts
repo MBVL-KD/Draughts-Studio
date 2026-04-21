@@ -1,6 +1,7 @@
 import { parsePlaybackPayloadShape } from "../validation/playbackSchemas";
 import { ValidationError } from "../utils/httpErrors";
 import { buildPlaybackHintPayload } from "../playback/buildPlaybackHint";
+import { buildAuthoringTimelinePlaybackBlock } from "../playback/buildAuthoringTimelineForPlayback";
 import { buildRuntimeValidationBlockWithAuthoring } from "../playback/buildRuntimeValidation";
 
 type LocalizedTextLike = {
@@ -154,6 +155,7 @@ export function buildPlaybackPayload(params: {
     params.authoringStep as Parameters<typeof buildRuntimeValidationBlockWithAuthoring>[1]
   );
   const hintPayload = buildPlaybackHintPayload(step, language);
+  const authoringPlayback = buildAuthoringTimelinePlaybackBlock(params.authoringStep, language);
 
   const payload = {
     payloadType: "lesson-step-playback" as const,
@@ -187,6 +189,7 @@ export function buildPlaybackPayload(params: {
         }
       : {}),
     ...(hintPayload ? { hint: hintPayload } : {}),
+    ...(authoringPlayback ? authoringPlayback : {}),
   };
 
   const parsed = parsePlaybackPayloadShape(payload);
