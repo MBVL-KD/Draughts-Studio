@@ -597,15 +597,22 @@ export default function BoardSceneCanvas({
   const useAuthoringMomentOverlays =
     authoringPreview != null && !authoringPreview.preferStubPresentationForOverlays;
 
-  const displayHighlights = useAuthoringMomentOverlays
-    ? authoringPreview.highlights
-    : safeHighlights;
-  const displayArrows = useAuthoringMomentOverlays
-    ? authoringPreview.arrows
-    : safeArrows;
-  const displayRoutes = useAuthoringMomentOverlays
-    ? authoringPreview.routes
-    : safeRoutes;
+  /** Highlight/arrow/route edits always write `step.presentation`; show that layer while editing. */
+  const isDrawingOverlayMode =
+    sceneMode === "highlight" || sceneMode === "arrow" || sceneMode === "route";
+
+  const displayHighlights =
+    useAuthoringMomentOverlays && !isDrawingOverlayMode
+      ? authoringPreview.highlights
+      : safeHighlights;
+  const displayArrows =
+    useAuthoringMomentOverlays && !isDrawingOverlayMode
+      ? authoringPreview.arrows
+      : safeArrows;
+  const displayRoutes =
+    useAuthoringMomentOverlays && !isDrawingOverlayMode
+      ? authoringPreview.routes
+      : safeRoutes;
 
   const effectiveRecordSlot =
     recorderInspectPly !== null ? recorderInspectPly : recorder.state.moves.length;
@@ -2620,10 +2627,10 @@ const emptyManagerStyle: CSSProperties = {
 const canvasWrapStyle: CSSProperties = {
   width: "100%",
   minHeight: "min(70vh, 780px)",
-  border: "1px solid #dbe3ec",
-  background: "#f9fbff",
-  borderRadius: 18,
-  padding: 10,
+  border: "none",
+  background: "transparent",
+  borderRadius: 0,
+  padding: 0,
   boxSizing: "border-box",
   display: "flex",
   alignItems: "flex-start",

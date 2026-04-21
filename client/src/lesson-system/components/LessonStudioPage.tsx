@@ -4434,8 +4434,8 @@ export default function LessonStudioPage() {
                 </button>
                 <p style={{ margin: "8px 0 0", fontSize: 12, color: "#64748b", lineHeight: 1.45 }}>
                   {editorLanguage === "nl"
-                    ? "Teken highlights, pijlen en routes op het bord (legacy tools). Klik daarna hier om ze op dit moment te zetten. Leeg bord wist de overlays op dit moment."
-                    : "Draw highlights, arrows, and routes on the board (legacy tools), then click here to copy them onto this moment. An empty board clears this moment's overlays."}
+                    ? "Kies boven het bord Highlight / Arrow / Route (niet Paint). Teken, klik dan hier om op dit moment te zetten. Leeg bord wist de overlays op dit moment."
+                    : "Use Highlight / Arrow / Route above the board (not Paint). Draw, then click here to copy onto this moment. An empty board clears this moment's overlays."}
                 </p>
               </div>
             ) : null}
