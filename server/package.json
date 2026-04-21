@@ -7,8 +7,12 @@
     "start": "node src/index.js",
     "dev": "nodemon --watch src --ext js,ts,json src/index.js",
     "clean:import-data": "node src/scripts/cleanImportStudioData.js",
+    "normalize:puzzle-hints-intro": "node src/scripts/normalizePuzzleHintsAndIntro.js",
+    "reseed:imported-puzzle-ratings": "node src/scripts/reseedImportedPuzzleRatings.js",
     "repair:imported-puzzles": "ts-node src/scripts/repairImportedPuzzleMismatches.ts",
-    "remove:empty-imported-puzzles": "ts-node src/scripts/removeEmptyImportedPuzzles.ts"
+    "remove:empty-imported-puzzles": "ts-node src/scripts/removeEmptyImportedPuzzles.ts",
+    "audit:empty-puzzle-steps": "node src/scripts/auditEmptyPuzzleSteps.js",
+    "backfill:book-access-defaults": "node src/scripts/backfillBookAccessDefaults.js"
   },
   "keywords": [],
   "author": "",

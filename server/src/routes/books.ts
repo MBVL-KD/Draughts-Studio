@@ -17,6 +17,13 @@ import { getOwnerContext } from "./ownerContext";
 type Req = express.Request;
 type Res = express.Response;
 
+type UnlockRules = {
+  type: "none" | "requires_exams";
+  requiredBookId?: string;
+  requiredExamLessonIds?: string[];
+  requiredPassMode?: "all" | "any";
+};
+
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return (
     typeof value === "object" &&
@@ -37,10 +44,71 @@ function toFiniteNumber(value: unknown): number | undefined {
   return Number.isFinite(parsed) ? parsed : undefined;
 }
 
+function toBoolean(value: unknown): boolean | undefined {
+  if (typeof value === "boolean") return value;
+  if (typeof value !== "string") return undefined;
+  if (value === "true" || value === "1") return true;
+  if (value === "false" || value === "0") return false;
+  return undefined;
+}
+
+function normalizeUnlockRules(raw: unknown): UnlockRules {
+  const obj = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  const type = obj.type === "requires_exams" ? "requires_exams" : "none";
+  const requiredBookId = typeof obj.requiredBookId === "string" && obj.requiredBookId.trim() ? obj.requiredBookId : undefined;
+  const requiredExamLessonIds = Array.isArray(obj.requiredExamLessonIds)
+    ? obj.requiredExamLessonIds.filter((v): v is string => typeof v === "string" && v.trim().length > 0)
+    : undefined;
+  const requiredPassMode = obj.requiredPassMode === "any" ? "any" : obj.requiredPassMode === "all" ? "all" : undefined;
+  return { type, requiredBookId, requiredExamLessonIds, requiredPassMode };
+}
+
+function normalizeBookForClient(
+  item: Record<string, unknown>,
+  gates?: { isEntitled?: boolean; examGatePassed?: boolean }
+): Record<string, unknown> {
+  const accessModel = item.accessModel === "paid" ? "paid" : "free";
+  const productId = typeof item.productId === "string" ? item.productId : "";
+  const unlockRules = normalizeUnlockRules(item.unlockRules);
+  const sequenceIndexRaw = Number(item.sequenceIndex);
+  const sequenceIndex = Number.isFinite(sequenceIndexRaw) ? Math.trunc(sequenceIndexRaw) : 9999;
+  const lessons = Array.isArray(item.lessons) ? item.lessons : [];
+  const normalizedLessons = lessons.map((lesson) => {
+    if (!lesson || typeof lesson !== "object") return lesson;
+    const row = lesson as Record<string, unknown>;
+    return {
+      ...row,
+      isExam: row.isExam === true,
+    };
+  });
+
+  const entitlementOk = accessModel === "free" || (!!productId && gates?.isEntitled === true);
+  const examGateOk = unlockRules.type !== "requires_exams" || gates?.examGatePassed === true;
+  const lockReasons: string[] = [];
+  if (!entitlementOk && accessModel === "paid") lockReasons.push("LOCKED_PURCHASE_REQUIRED");
+  if (!examGateOk) lockReasons.push("LOCKED_PREREQ_EXAMS");
+
+  return {
+    ...item,
+    accessModel,
+    productId,
+    unlockRules,
+    sequenceIndex,
+    lessons: normalizedLessons,
+    eligibility: {
+      eligible: entitlementOk && examGateOk,
+      entitlementOk,
+      examGateOk,
+      lockReasons,
+    },
+  };
+}
+
 function sendItem(res: Res, item: Record<string, unknown>) {
+  const normalized = normalizeBookForClient(item);
   res.json({
     item: {
-      ...item,
+      ...normalized,
       revision: item.revision,
     },
   });
@@ -81,12 +149,17 @@ booksRouter.get("/", async (req: Req, res: Res) => {
       offset,
       sort: parseSort(req.query.sort),
     });
+    const isEntitled = toBoolean(req.query.isEntitled);
+    const examGatePassed = toBoolean(req.query.examGatePassed);
+    const normalizedItems = items.map((it) =>
+      normalizeBookForClient(it as unknown as Record<string, unknown>, { isEntitled, examGatePassed })
+    );
     res.json({
-      items,
+      items: normalizedItems,
       pagination: {
         limit: limit ?? 25,
         offset: offset ?? 0,
-        count: items.length,
+        count: normalizedItems.length,
       },
     });
   } catch (error) {
