@@ -71,10 +71,11 @@ import type {
   SourceMetadata,
   SourceKind,
 } from "../types/analysisTypes";
-import { listBooks } from "../api/booksApi";
+import { autoTranslateMissingI18n, listBooks } from "../api/booksApi";
 import { persistCurriculumBookDocument } from "../api/lessonStorageApi";
 import { createSource, listSources, patchSource } from "../api/sourcesApi";
 import { getStepPlayback } from "../api/playbackApi";
+import { PLAYBACK_EXPORT_REQUIRED_LANGUAGES } from "../config/playbackExportLanguages";
 import type { ApiError } from "../api/httpClient";
 import type { CurriculumSaveStatus } from "../storage/persistedBookTypes";
 import { normalizeBookForSave, normalizeBookFromServer } from "../storage/normalizePersistedBook";
@@ -89,6 +90,7 @@ import { getDocumentId, getDocumentRevision } from "../utils/documentIds";
 import { findMissingLocalizedTexts } from "../i18n/findMissingLocalizedTexts";
 import { exportMissingTexts } from "../i18n/exportMissingTexts";
 import { applyTranslatedTexts } from "../i18n/applyTranslatedTexts";
+import { exportAllLocalizedTextsFromBooks } from "../i18n/exportAllLocalizedTexts";
 import type { RecordedMove } from "../../features/recorder/useSolutionRecorder";
 import BoardSceneCanvas from "./BoardSceneCanvas";
 import ImportJobsPanel from "./ImportJobsPanel";
@@ -464,6 +466,16 @@ function getMissingLanguages(
   value: unknown,
   required: string[] = ["en", "nl"]
 ): string[] {
+  const placeholderValues = new Set([
+    "new book",
+    "new lesson",
+    "new step",
+    "coach text",
+    "intro",
+    "checkpoint",
+    "option a",
+    "option b",
+  ]);
   if (
     !value ||
     typeof value !== "object" ||
@@ -476,7 +488,9 @@ function getMissingLanguages(
   const values = (value as { values: Record<string, unknown> }).values;
   return required.filter((language) => {
     const text = values[language];
-    return typeof text !== "string" || !text.trim();
+    if (typeof text !== "string") return true;
+    const normalized = text.trim().toLowerCase();
+    return !normalized || placeholderValues.has(normalized);
   });
 }
 
@@ -594,6 +608,11 @@ export default function LessonStudioPage() {
   });
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [i18nPanelOpen, setI18nPanelOpen] = useState(false);
+  const [warningsPanelOpen, setWarningsPanelOpen] = useState(false);
+  const [expandedBooksById, setExpandedBooksById] = useState<Record<string, boolean>>({});
+  const [curriculumHeaderCollapsed, setCurriculumHeaderCollapsed] = useState<boolean>(() => {
+    return readStoredString("studio.curriculumHeaderCollapsed", "1") === "1";
+  });
   const [activeVariant] = useState<string>("international");
   const [workspaceTab, setWorkspaceTab] = useState<WorkspaceTab>("curriculum");
 
@@ -683,8 +702,16 @@ export default function LessonStudioPage() {
     const filtered = books.filter((book) =>
       book.lessons.some((lesson) => (lesson.variantId ?? activeVariant) === activeVariant)
     );
-    return filtered.length > 0 ? filtered : books;
-  }, [books, activeVariant]);
+    const source = filtered.length > 0 ? filtered : books;
+    return [...source].sort((a, b) => {
+      const seqA = typeof a.sequenceIndex === "number" ? a.sequenceIndex : Number.MAX_SAFE_INTEGER;
+      const seqB = typeof b.sequenceIndex === "number" ? b.sequenceIndex : Number.MAX_SAFE_INTEGER;
+      if (seqA !== seqB) return seqA - seqB;
+      const titleA = readLocalizedText(a.title, editorLanguage).trim();
+      const titleB = readLocalizedText(b.title, editorLanguage).trim();
+      return titleA.localeCompare(titleB);
+    });
+  }, [books, activeVariant, editorLanguage]);
 
   const selectedBook = useMemo(
     () => visibleBooks.find((book) => book.id === selectedBookId) ?? null,
@@ -1397,7 +1424,7 @@ export default function LessonStudioPage() {
         bookId: selectedBookId,
         lessonId: selectedLessonId,
         lang: editorLanguage,
-        requiredLanguage: ["en"],
+        requiredLanguage: [...PLAYBACK_EXPORT_REQUIRED_LANGUAGES],
       });
       const item =
         response &&
@@ -1469,6 +1496,25 @@ export default function LessonStudioPage() {
       "nl",
     ]);
     console.log("[i18n] export missing texts", result);
+    setTranslationsImportJson(JSON.stringify(result, null, 2));
+    setSyncError("");
+    setSyncMessage(
+      editorLanguage === "nl"
+        ? "Ontbrekende teksten geëxporteerd naar het i18n-veld."
+        : "Missing texts exported into the i18n text area."
+    );
+  };
+
+  const handleExportAllBooksTexts = () => {
+    const payload = exportAllLocalizedTextsFromBooks(books.map((book) => normalizeBookForSave(book)));
+    console.log("[i18n] export all books localized texts", payload);
+    setTranslationsImportJson(JSON.stringify(payload, null, 2));
+    setSyncError("");
+    setSyncMessage(
+      editorLanguage === "nl"
+        ? `Alle boek-/lesteksten geëxporteerd (${payload.books.length} boeken).`
+        : `All book/lesson texts exported (${payload.books.length} books).`
+    );
   };
 
   const handleApplyImportedTranslations = () => {
@@ -1485,20 +1531,82 @@ export default function LessonStudioPage() {
     }
     try {
       const parsed = JSON.parse(raw);
-      if (!Array.isArray(parsed)) {
-        throw new Error("Translation payload must be an array.");
+      if (Array.isArray(parsed)) {
+        const safeBook = normalizeBookForSave(selectedBook);
+        const updatedBook = applyTranslatedTexts(safeBook, parsed);
+        const bookId = getDocumentId(safeBook);
+        setBooks((prev) =>
+          prev.map((book) => (getDocumentId(book) === bookId ? updatedBook : book))
+        );
+      } else if (
+        parsed &&
+        typeof parsed === "object" &&
+        "schemaVersion" in parsed &&
+        (parsed as { schemaVersion?: unknown }).schemaVersion === "studio-i18n-all-books.v1" &&
+        "books" in parsed &&
+        Array.isArray((parsed as { books?: unknown[] }).books)
+      ) {
+        const patchesByBookId = new Map<string, unknown[]>();
+        for (const entry of (parsed as { books: Array<{ bookId?: unknown; entries?: unknown[] }> }).books) {
+          const bid = typeof entry.bookId === "string" ? entry.bookId.trim() : "";
+          if (!bid || !Array.isArray(entry.entries)) continue;
+          patchesByBookId.set(bid, entry.entries);
+        }
+        setBooks((prev) =>
+          prev.map((book) => {
+            const bid = getDocumentId(book);
+            const patches = patchesByBookId.get(bid);
+            if (!patches) return book;
+            return applyTranslatedTexts(normalizeBookForSave(book), patches as Parameters<typeof applyTranslatedTexts>[1]);
+          })
+        );
+      } else {
+        throw new Error(
+          "Translation payload must be either an array (current book) or schema studio-i18n-all-books.v1."
+        );
       }
-      const safeBook = normalizeBookForSave(selectedBook);
-      const updatedBook = applyTranslatedTexts(safeBook, parsed);
-      const bookId = getDocumentId(safeBook);
-      setBooks((prev) =>
-        prev.map((book) => (getDocumentId(book) === bookId ? updatedBook : book))
-      );
       setSyncError("");
-      setSyncMessage("Imported translations applied to current book.");
+      setSyncMessage(
+        editorLanguage === "nl"
+          ? "Geimporteerde vertalingen toegepast."
+          : "Imported translations applied."
+      );
     } catch (error) {
       const message = error instanceof Error ? error.message : "Invalid JSON payload.";
       setSyncError(`Failed to apply imported translations: ${message}`);
+      setSyncMessage("");
+    }
+  };
+
+  const handleAutoTranslateMissingTexts = async () => {
+    try {
+      setSyncError("");
+      setSyncMessage(
+        editorLanguage === "nl"
+          ? "Automatische vertaling gestart..."
+          : "Automatic translation started..."
+      );
+      const response = await autoTranslateMissingI18n(false);
+      const item = response?.item;
+      if (!item || !item.ok) {
+        throw new Error("Auto-translation did not return a successful response.");
+      }
+      setSyncError("");
+      setSyncMessage(
+        editorLanguage === "nl"
+          ? `Auto-vertaling voltooid. Boeken bijgewerkt: ${item.updatedBooks}. EN: ${item.filledEnCount}, NL: ${item.filledNlCount}. Rapport: ${item.reportPath}`
+          : `Auto-translation complete. Books updated: ${item.updatedBooks}. EN: ${item.filledEnCount}, NL: ${item.filledNlCount}. Report: ${item.reportPath}`
+      );
+    } catch (error) {
+      const message =
+        error && typeof error === "object" && "message" in error
+          ? String((error as { message?: unknown }).message ?? "Failed")
+          : "Failed";
+      setSyncError(
+        editorLanguage === "nl"
+          ? `Auto-vertaling mislukt: ${message}`
+          : `Auto-translation failed: ${message}`
+      );
       setSyncMessage("");
     }
   };
@@ -1518,6 +1626,12 @@ export default function LessonStudioPage() {
   };
 
   const handleDeleteBook = (bookId: string) => {
+    const confirmed = window.confirm(
+      editorLanguage === "nl"
+        ? "Weet je zeker dat je dit boek wilt verwijderen?"
+        : "Are you sure you want to delete this book?"
+    );
+    if (!confirmed) return;
     setBooks((prev) => prev.filter((book) => book.id !== bookId));
   };
 
@@ -1541,11 +1655,42 @@ export default function LessonStudioPage() {
 
   const handleDeleteLesson = (lessonId: string) => {
     if (!selectedBookId) return;
+    const confirmed = window.confirm(
+      editorLanguage === "nl"
+        ? "Weet je zeker dat je deze les wilt verwijderen?"
+        : "Are you sure you want to delete this lesson?"
+    );
+    if (!confirmed) return;
 
     updateSelectedBook((book) => ({
       ...book,
       lessons: book.lessons.filter((lesson) => lesson.id !== lessonId),
     }));
+  };
+
+  const handleMoveLesson = (
+    bookId: string,
+    lessonId: string,
+    direction: "up" | "down",
+    visibleLessonIds: string[]
+  ) => {
+    const indexInVisible = visibleLessonIds.indexOf(lessonId);
+    if (indexInVisible < 0) return;
+    const targetVisibleIndex = direction === "up" ? indexInVisible - 1 : indexInVisible + 1;
+    if (targetVisibleIndex < 0 || targetVisibleIndex >= visibleLessonIds.length) return;
+    const swapWithLessonId = visibleLessonIds[targetVisibleIndex]!;
+
+    setBooks((prev) =>
+      prev.map((book) => {
+        if (book.id !== bookId) return book;
+        const nextLessons = [...book.lessons];
+        const a = nextLessons.findIndex((l) => l.id === lessonId);
+        const b = nextLessons.findIndex((l) => l.id === swapWithLessonId);
+        if (a < 0 || b < 0) return book;
+        [nextLessons[a], nextLessons[b]] = [nextLessons[b]!, nextLessons[a]!];
+        return { ...book, lessons: nextLessons };
+      })
+    );
   };
 
   const handleImportAuthoringFromSource = (args: {
@@ -2015,6 +2160,25 @@ export default function LessonStudioPage() {
         },
       });
     });
+  };
+
+  /**
+   * Copies legacy `LessonStep.presentation` (highlights / arrows / routes drawn on the board)
+   * into the selected authoring moment's `overlays`, using the same mapping as focusBoard live-sync.
+   */
+  const handleApplyBoardPresentationToAuthoringMoment = () => {
+    const moment = authoringPresentationMoment;
+    if (!moment || !selectedStep) return;
+    const overlays = stepPresentationToMomentOverlays(selectedStep);
+    const next: StepMoment = {
+      ...moment,
+      overlays: overlays.length > 0 ? overlays : undefined,
+    };
+    if (authoringInspectedBranchId) {
+      applyAuthoringSelectedBranchMoment(next);
+    } else {
+      applyAuthoringSelectedMoment(next);
+    }
   };
 
   const handleAuthoringTargetSquareToggle = (sq: number) => {
@@ -3084,6 +3248,71 @@ export default function LessonStudioPage() {
     }));
   };
 
+  const handleBookAccessModelChange = (value: "free" | "paid") => {
+    updateSelectedBook((book) => ({
+      ...book,
+      accessModel: value,
+      productId: value === "paid" ? (book.productId ?? "") : "",
+    }));
+  };
+
+  const handleBookProductIdChange = (value: string) => {
+    updateSelectedBook((book) => ({
+      ...book,
+      productId: value,
+    }));
+  };
+
+  const handleBookSequenceIndexChange = (value: string) => {
+    const parsed = Number(value);
+    updateSelectedBook((book) => ({
+      ...book,
+      sequenceIndex:
+        value.trim() === "" || !Number.isFinite(parsed)
+          ? undefined
+          : Math.max(1, Math.floor(parsed)),
+    }));
+  };
+
+  const handleBookUnlockTypeChange = (value: "none" | "requires_exams") => {
+    updateSelectedBook((book) => ({
+      ...book,
+      unlockRules:
+        value === "none"
+          ? { type: "none", requiredBookId: "", requiredExamLessonIds: [], requiredPassMode: "all" }
+          : {
+              type: "requires_exams",
+              requiredBookId: book.unlockRules?.requiredBookId ?? "",
+              requiredExamLessonIds: book.unlockRules?.requiredExamLessonIds ?? [],
+              requiredPassMode: book.unlockRules?.requiredPassMode ?? "all",
+            },
+    }));
+  };
+
+  const handleBookRequiredBookIdChange = (value: string) => {
+    updateSelectedBook((book) => ({
+      ...book,
+      unlockRules: {
+        type: book.unlockRules?.type ?? "requires_exams",
+        requiredBookId: value,
+        requiredExamLessonIds: book.unlockRules?.requiredExamLessonIds ?? [],
+        requiredPassMode: book.unlockRules?.requiredPassMode ?? "all",
+      },
+    }));
+  };
+
+  const handleBookRequiredPassModeChange = (value: "all" | "any") => {
+    updateSelectedBook((book) => ({
+      ...book,
+      unlockRules: {
+        type: book.unlockRules?.type ?? "requires_exams",
+        requiredBookId: book.unlockRules?.requiredBookId ?? "",
+        requiredExamLessonIds: book.unlockRules?.requiredExamLessonIds ?? [],
+        requiredPassMode: value,
+      },
+    }));
+  };
+
   const handleRenameLesson = (title: string) => {
     updateSelectedLesson((lesson) => {
       const nextTitle = writeLocalizedText(lesson.title, editorLanguage, title);
@@ -3126,6 +3355,21 @@ export default function LessonStudioPage() {
         },
       };
     });
+  };
+
+  const handleLessonIsExamChange = (checked: boolean) => {
+    updateSelectedLesson((lesson) => ({
+      ...lesson,
+      isExam: checked,
+      examConfig: checked
+        ? {
+            passScorePercent: lesson.examConfig?.passScorePercent ?? 70,
+            minCorrect: lesson.examConfig?.minCorrect,
+            maxAttempts: lesson.examConfig?.maxAttempts,
+            timeLimitSec: lesson.examConfig?.timeLimitSec,
+          }
+        : lesson.examConfig,
+    }));
   };
 
   const handleCreateSource = () => {
@@ -3233,7 +3477,7 @@ export default function LessonStudioPage() {
     workspaceTab === "curriculum"
       ? {
           ...rootStyle,
-          gridTemplateRows: "224px minmax(0, 1fr)",
+          gridTemplateRows: `${curriculumHeaderCollapsed ? 210 : 360}px minmax(0, 1fr)`,
         }
       : workspaceTab === "imports"
       ? {
@@ -3329,13 +3573,19 @@ export default function LessonStudioPage() {
                     </span>
                     {curriculumPersistPreview &&
                     curriculumPersistPreview.validation.warnings.length > 0 ? (
-                      <span style={curriculumWarningsStyle} title={curriculumPersistPreview.validation.warnings
-                        .slice(0, 6)
-                        .map((w) => `${w.path}: ${w.message}`)
-                        .join("\n")}>
+                      <button
+                        type="button"
+                        style={curriculumWarningsButtonStyle}
+                        onClick={() => setWarningsPanelOpen(true)}
+                        title={
+                          editorLanguage === "nl"
+                            ? "Klik om waarschuwingen te bekijken"
+                            : "Click to view warnings"
+                        }
+                      >
                         {editorLanguage === "nl" ? "Waarschuwingen" : "Warnings"}:{" "}
                         {curriculumPersistPreview.validation.warnings.length}
-                      </span>
+                      </button>
                     ) : null}
                     {autosaveHint ? (
                       <span
@@ -3465,47 +3715,201 @@ export default function LessonStudioPage() {
 
             {workspaceTab === "curriculum" ? (
               <div style={titleGridStyle}>
-                <input
-                  value={
-                    selectedBook
-                      ? readLocalizedText(selectedBook.title, editorLanguage)
-                      : ""
-                  }
-                  onChange={(e) => handleRenameBook(e.target.value)}
-                  placeholder={editorLanguage === "nl" ? "Boektitel" : "Book title"}
-                  style={bookTitleInputStyle}
-                  disabled={!selectedBook}
-                />
-
-                <div style={inlineRowStyle}>
+                <div style={headerSectionToggleRowStyle}>
+                  <button
+                    type="button"
+                    style={headerSectionToggleButtonStyle}
+                    onClick={() => {
+                      setCurriculumHeaderCollapsed((prev) => {
+                        const next = !prev;
+                        if (typeof window !== "undefined") {
+                          window.localStorage.setItem(
+                            "studio.curriculumHeaderCollapsed",
+                            next ? "1" : "0"
+                          );
+                        }
+                        return next;
+                      });
+                    }}
+                  >
+                    {curriculumHeaderCollapsed
+                      ? editorLanguage === "nl"
+                        ? "Header-velden uitklappen"
+                        : "Expand header fields"
+                      : editorLanguage === "nl"
+                      ? "Header-velden inklappen"
+                      : "Collapse header fields"}
+                  </button>
+                </div>
+                <div style={labeledFieldStackStyle}>
+                  <div style={fieldLabelStyle}>{editorLanguage === "nl" ? "Boek" : "Book"}</div>
                   <input
                     value={
-                      selectedLesson
-                        ? readLocalizedText(selectedLesson.title, editorLanguage)
+                      selectedBook
+                        ? readLocalizedText(selectedBook.title, editorLanguage)
                         : ""
                     }
-                    onChange={(e) => handleRenameLesson(e.target.value)}
-                    placeholder={editorLanguage === "nl" ? "Lestitel" : "Lesson title"}
-                    style={lessonTitleInputStyle}
-                    disabled={!selectedLesson}
-                  />
-
-                  <input
-                    value={
-                      selectedLesson
-                        ? readLocalizedText(selectedLesson.description, editorLanguage)
-                        : ""
-                    }
-                    onChange={(e) => handleLessonDescriptionChange(e.target.value)}
-                    placeholder={
-                      editorLanguage === "nl"
-                        ? "Korte lesbeschrijving"
-                        : "Short lesson description"
-                    }
-                    style={compactInputStyle}
-                    disabled={!selectedLesson}
+                    onChange={(e) => handleRenameBook(e.target.value)}
+                    placeholder={editorLanguage === "nl" ? "Boektitel" : "Book title"}
+                    style={bookTitleInputStyle}
+                    disabled={!selectedBook}
                   />
                 </div>
+                {!curriculumHeaderCollapsed ? (
+                  <>
+                    <div style={inlineRowStyle}>
+                      <select
+                        value={selectedBook?.accessModel ?? "free"}
+                        onChange={(e) =>
+                          handleBookAccessModelChange(e.target.value as "free" | "paid")
+                        }
+                        style={compactInputStyle}
+                        disabled={!selectedBook}
+                      >
+                        <option value="free">
+                          {editorLanguage === "nl" ? "Toegang: gratis" : "Access: free"}
+                        </option>
+                        <option value="paid">
+                          {editorLanguage === "nl" ? "Toegang: betaald" : "Access: paid"}
+                        </option>
+                      </select>
+                      <input
+                        value={selectedBook?.productId ?? ""}
+                        onChange={(e) => handleBookProductIdChange(e.target.value)}
+                        placeholder={
+                          editorLanguage === "nl"
+                            ? "Shop productId (bij betaald)"
+                            : "Shop productId (paid only)"
+                        }
+                        style={compactInputStyle}
+                        disabled={!selectedBook || (selectedBook?.accessModel ?? "free") !== "paid"}
+                      />
+                    </div>
+                    <div style={inlineRowStyle}>
+                      <input
+                        type="number"
+                        min={1}
+                        value={selectedBook?.sequenceIndex ?? ""}
+                        onChange={(e) => handleBookSequenceIndexChange(e.target.value)}
+                        placeholder={
+                          editorLanguage === "nl"
+                            ? "Boekvolgorde (1,2,3…)"
+                            : "Book order (1,2,3...)"
+                        }
+                        style={compactInputStyle}
+                        disabled={!selectedBook}
+                      />
+                      <select
+                        value={selectedBook?.unlockRules?.type ?? "none"}
+                        onChange={(e) =>
+                          handleBookUnlockTypeChange(e.target.value as "none" | "requires_exams")
+                        }
+                        style={compactInputStyle}
+                        disabled={!selectedBook}
+                      >
+                        <option value="none">
+                          {editorLanguage === "nl" ? "Unlock: geen" : "Unlock: none"}
+                        </option>
+                        <option value="requires_exams">
+                          {editorLanguage === "nl"
+                            ? "Unlock: examens vereist"
+                            : "Unlock: requires exams"}
+                        </option>
+                      </select>
+                    </div>
+                    {(selectedBook?.unlockRules?.type ?? "none") === "requires_exams" ? (
+                      <div style={inlineRowStyle}>
+                        <select
+                          value={selectedBook?.unlockRules?.requiredBookId ?? ""}
+                          onChange={(e) => handleBookRequiredBookIdChange(e.target.value)}
+                          style={compactInputStyle}
+                          disabled={!selectedBook}
+                        >
+                          <option value="">
+                            {editorLanguage === "nl"
+                              ? "Kies vereist boek"
+                              : "Select required book"}
+                          </option>
+                          {books
+                            .filter((book) => book.id !== selectedBook?.id)
+                            .sort(
+                              (a, b) =>
+                                (a.sequenceIndex ?? Number.MAX_SAFE_INTEGER) -
+                                (b.sequenceIndex ?? Number.MAX_SAFE_INTEGER)
+                            )
+                            .map((book) => {
+                              const id = book.bookId ?? book.id;
+                              const title = readLocalizedText(book.title, editorLanguage).trim() || id;
+                              return (
+                                <option key={id} value={id}>
+                                  {title} ({id})
+                                </option>
+                              );
+                            })}
+                        </select>
+                        <select
+                          value={selectedBook?.unlockRules?.requiredPassMode ?? "all"}
+                          onChange={(e) =>
+                            handleBookRequiredPassModeChange(e.target.value as "all" | "any")
+                          }
+                          style={compactInputStyle}
+                          disabled={!selectedBook}
+                        >
+                          <option value="all">
+                            {editorLanguage === "nl"
+                              ? "Examens: allemaal geslaagd"
+                              : "Exams: all passed"}
+                          </option>
+                          <option value="any">
+                            {editorLanguage === "nl"
+                              ? "Examens: minimaal één geslaagd"
+                              : "Exams: any passed"}
+                          </option>
+                        </select>
+                      </div>
+                    ) : null}
+                    <div style={labeledFieldStackStyle}>
+                      <div style={fieldLabelStyle}>{editorLanguage === "nl" ? "Les" : "Lesson"}</div>
+                      <input
+                        value={
+                          selectedLesson
+                            ? readLocalizedText(selectedLesson.title, editorLanguage)
+                            : ""
+                        }
+                        onChange={(e) => handleRenameLesson(e.target.value)}
+                        placeholder={editorLanguage === "nl" ? "Lestitel" : "Lesson title"}
+                        style={lessonTitleInputStyle}
+                        disabled={!selectedLesson}
+                      />
+                      <label style={lessonExamToggleStyle}>
+                        <input
+                          type="checkbox"
+                          checked={!!selectedLesson?.isExam}
+                          onChange={(e) => handleLessonIsExamChange(e.target.checked)}
+                          disabled={!selectedLesson}
+                        />
+                        {editorLanguage === "nl"
+                          ? "Geselecteerde les is een examenles"
+                          : "Selected lesson is an exam lesson"}
+                      </label>
+                      <input
+                        value={
+                          selectedLesson
+                            ? readLocalizedText(selectedLesson.description, editorLanguage)
+                            : ""
+                        }
+                        onChange={(e) => handleLessonDescriptionChange(e.target.value)}
+                        placeholder={
+                          editorLanguage === "nl"
+                            ? "Korte lesbeschrijving"
+                            : "Short lesson description"
+                        }
+                        style={compactInputStyle}
+                        disabled={!selectedLesson}
+                      />
+                    </div>
+                  </>
+                ) : null}
               </div>
             ) : workspaceTab === "sources" ? (
               <div style={titleGridStyle}>
@@ -3610,6 +4014,24 @@ export default function LessonStudioPage() {
                 >
                   {editorLanguage === "nl" ? "Exporteer ontbrekende teksten" : "Export missing texts"}
                 </button>
+                <button
+                  type="button"
+                  onClick={handleExportAllBooksTexts}
+                  style={secondaryActionButtonStyle}
+                  title="Export all localized texts from all books"
+                >
+                  {editorLanguage === "nl"
+                    ? "Exporteer alle boek-/lesteksten"
+                    : "Export all book/lesson texts"}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleAutoTranslateMissingTexts}
+                  style={secondaryActionButtonStyle}
+                  title="Auto-translate missing localized texts via backend"
+                >
+                  {editorLanguage === "nl" ? "Auto-vertaal ontbrekende teksten" : "Auto-translate missing texts"}
+                </button>
               </div>
             ) : (
               <div style={{ fontSize: 12, color: "#64748b", marginBottom: 8 }}>
@@ -3650,6 +4072,38 @@ export default function LessonStudioPage() {
                 ? "Geimporteerde vertalingen toepassen"
                 : "Apply imported translations"}
             </button>
+          </div>
+        </div>
+      ) : null}
+      {warningsPanelOpen ? (
+        <div style={settingsOverlayStyle} onClick={() => setWarningsPanelOpen(false)}>
+          <div
+            style={{ ...settingsPanelFloatingStyle, maxWidth: "min(92vw, 720px)", width: 720 }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div style={settingsPanelHeaderStyle}>
+              <strong>{editorLanguage === "nl" ? "Validatie-waarschuwingen" : "Validation warnings"}</strong>
+              <button
+                type="button"
+                style={secondaryActionButtonStyle}
+                onClick={() => setWarningsPanelOpen(false)}
+              >
+                {editorLanguage === "nl" ? "Sluiten" : "Close"}
+              </button>
+            </div>
+            <div style={warningsSummaryStyle}>
+              {(curriculumPersistPreview?.validation.warnings.length ?? 0)}{" "}
+              {editorLanguage === "nl" ? "waarschuwing(en)" : "warning(s)"}
+            </div>
+            <div style={warningsListWrapStyle}>
+              {(curriculumPersistPreview?.validation.warnings ?? []).map((w, idx) => (
+                <div key={`${w.path}:${w.code}:${idx}`} style={warningItemStyle}>
+                  <div style={warningPathStyle}>{w.path}</div>
+                  <div style={warningMessageStyle}>{w.message}</div>
+                  <div style={warningCodeStyle}>{w.code}</div>
+                </div>
+              ))}
+            </div>
           </div>
         </div>
       ) : null}
@@ -3784,16 +4238,20 @@ export default function LessonStudioPage() {
           <div style={booksWrapStyle}>
             <div style={sidebarHeaderStyle}>
               <div>
-                <div style={sidebarEyebrowStyle}>Books</div>
-                <div style={sidebarTitleStyle}>Books & lessons</div>
+                <div style={sidebarEyebrowStyle}>
+                  {editorLanguage === "nl" ? "Boeken" : "Books"}
+                </div>
+                <div style={sidebarTitleStyle}>
+                  {editorLanguage === "nl" ? "Boeken & lessen" : "Books & lessons"}
+                </div>
               </div>
               <button type="button" onClick={handleCreateBook} style={sidebarButtonStyle}>
-                + Book
+                {editorLanguage === "nl" ? "+ Boek" : "+ Book"}
               </button>
             </div>
-
             {visibleBooks.map((book) => {
               const isActiveBook = book.id === selectedBookId;
+              const isBookExpanded = !!expandedBooksById[book.id];
               const visibleBookLessons = book.lessons.filter(
                 (lesson) => lesson.variantId === activeVariant
               );
@@ -3801,6 +4259,27 @@ export default function LessonStudioPage() {
               return (
                 <div key={book.id} style={bookCardStyle}>
                   <div style={bookHeaderRowStyle}>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setExpandedBooksById((prev) => ({
+                          ...prev,
+                          [book.id]: !prev[book.id],
+                        }))
+                      }
+                      style={bookExpandToggleStyle}
+                      title={
+                        isBookExpanded
+                          ? editorLanguage === "nl"
+                            ? "Boek inklappen"
+                            : "Collapse book"
+                          : editorLanguage === "nl"
+                          ? "Boek uitklappen"
+                          : "Expand book"
+                      }
+                    >
+                      {isBookExpanded ? "−" : "+"}
+                    </button>
                     <button
                       type="button"
                       onClick={() => {
@@ -3820,54 +4299,90 @@ export default function LessonStudioPage() {
                       type="button"
                       onClick={() => handleDeleteBook(book.id)}
                       style={dangerTinyButtonStyle}
+                      title={editorLanguage === "nl" ? "Boek verwijderen" : "Delete book"}
                     >
-                      Delete
+                      🗑
                     </button>
                   </div>
 
-                  <div style={lessonListStyle}>
-                    {visibleBookLessons.map((lesson) => {
-                      const isActiveLesson = lesson.id === selectedLessonId;
+                  {isBookExpanded ? (
+                    <div style={lessonListStyle}>
+                      {visibleBookLessons.map((lesson, lessonIndex) => {
+                        const isActiveLesson = lesson.id === selectedLessonId;
 
-                      return (
-                        <div key={lesson.id} style={lessonRowStyle}>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              const step = lesson.steps[0] ?? null;
+                        return (
+                          <div key={lesson.id} style={lessonRowStyle}>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const step = lesson.steps[0] ?? null;
 
-                              setSelectedBookId(book.id);
-                              setSelectedLessonId(lesson.id);
-                              setSelectedStepId(step?.id ?? null);
-                            }}
-                            style={
-                              isActiveLesson
-                                ? activeLessonButtonStyle
-                                : lessonButtonStyle
-                            }
-                          >
-                            {readLocalizedText(lesson.title, editorLanguage)}
-                          </button>
+                                setSelectedBookId(book.id);
+                                setSelectedLessonId(lesson.id);
+                                setSelectedStepId(step?.id ?? null);
+                              }}
+                              style={
+                                isActiveLesson
+                                  ? activeLessonButtonStyle
+                                  : lessonButtonStyle
+                              }
+                            >
+                              {readLocalizedText(lesson.title, editorLanguage)}
+                            </button>
 
-                          <button
-                            type="button"
-                            onClick={() => handleDeleteLesson(lesson.id)}
-                            style={dangerTinyButtonStyle}
-                          >
-                            Delete
-                          </button>
-                        </div>
-                      );
-                    })}
-                  </div>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                handleMoveLesson(
+                                  book.id,
+                                  lesson.id,
+                                  "up",
+                                  visibleBookLessons.map((l) => l.id)
+                                )
+                              }
+                              style={secondaryTinyButtonStyle}
+                              disabled={lessonIndex === 0}
+                              title={editorLanguage === "nl" ? "Les omhoog" : "Move lesson up"}
+                            >
+                              ↑
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                handleMoveLesson(
+                                  book.id,
+                                  lesson.id,
+                                  "down",
+                                  visibleBookLessons.map((l) => l.id)
+                                )
+                              }
+                              style={secondaryTinyButtonStyle}
+                              disabled={lessonIndex === visibleBookLessons.length - 1}
+                              title={editorLanguage === "nl" ? "Les omlaag" : "Move lesson down"}
+                            >
+                              ↓
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleDeleteLesson(lesson.id)}
+                              style={dangerTinyButtonStyle}
+                              title={editorLanguage === "nl" ? "Les verwijderen" : "Delete lesson"}
+                            >
+                              🗑
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ) : null}
 
-                  {isActiveBook ? (
+                  {isActiveBook && isBookExpanded ? (
                     <button
                       type="button"
                       onClick={handleCreateLesson}
                       style={secondaryFullButtonStyle}
                     >
-                      + Add lesson
+                      {editorLanguage === "nl" ? "+ Les toevoegen" : "+ Add lesson"}
                     </button>
                   ) : null}
                 </div>
@@ -4385,6 +4900,33 @@ export default function LessonStudioPage() {
                 onPaste={handlePasteAuthoringPresentationRuntime}
               />
             ) : null}
+            {authoringPresentationMoment && selectedStep ? (
+              <div style={{ marginBottom: 10, padding: "8px 10px", background: "#f8fafc", borderRadius: 8, border: "1px solid #e2e8f0" }}>
+                <button
+                  type="button"
+                  onClick={handleApplyBoardPresentationToAuthoringMoment}
+                  style={{
+                    border: "1px solid #2563eb",
+                    background: "#fff",
+                    color: "#1d4ed8",
+                    borderRadius: 8,
+                    padding: "8px 12px",
+                    fontSize: 13,
+                    fontWeight: 600,
+                    cursor: "pointer",
+                  }}
+                >
+                  {editorLanguage === "nl"
+                    ? "Bord → moment-overlays"
+                    : "Board → moment overlays"}
+                </button>
+                <p style={{ margin: "8px 0 0", fontSize: 12, color: "#64748b", lineHeight: 1.45 }}>
+                  {editorLanguage === "nl"
+                    ? "Teken highlights, pijlen en routes op het bord (legacy tools). Daarna: hier klikken om ze op dit moment te zetten. Leeg bord = overlays op dit moment wissen."
+                    : "Draw highlights, arrows, and routes on the board (legacy tools), then click here to copy them onto this moment. Empty board clears this moment's overlays."}
+                </p>
+              </div>
+            ) : null}
             {authoringPresentationMoment ? (
               <AuthoringMomentPresentationPanel
                 moment={authoringPresentationMoment}
@@ -4496,6 +5038,7 @@ const headerWrapStyle: CSSProperties = {
   gridArea: "header",
   background: "#fff",
   borderBottom: "1px solid #dbe3ec",
+  overflowY: "auto",
 };
 
 const headerStyle: CSSProperties = {
@@ -4544,6 +5087,35 @@ const titleGridStyle: CSSProperties = {
   gridAutoRows: "minmax(36px, auto)",
   gap: 8,
   minWidth: 0,
+};
+
+const headerSectionToggleRowStyle: CSSProperties = {
+  display: "flex",
+  justifyContent: "flex-start",
+};
+
+const headerSectionToggleButtonStyle: CSSProperties = {
+  border: "1px solid #cfd8e3",
+  borderRadius: 999,
+  background: "#f8fafc",
+  color: "#334155",
+  fontSize: 11,
+  fontWeight: 700,
+  padding: "5px 10px",
+  cursor: "pointer",
+};
+
+const labeledFieldStackStyle: CSSProperties = {
+  display: "grid",
+  gap: 6,
+};
+
+const fieldLabelStyle: CSSProperties = {
+  fontSize: 11,
+  fontWeight: 800,
+  letterSpacing: "0.05em",
+  textTransform: "uppercase",
+  color: "#64748b",
 };
 
 const inlineRowStyle: CSSProperties = {
@@ -4626,6 +5198,17 @@ const compactInputStyle: CSSProperties = {
   color: "#6b7280",
 };
 
+const lessonExamToggleStyle: CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 8,
+  fontSize: 12,
+  fontWeight: 700,
+  color: "#475569",
+  textTransform: "none",
+  letterSpacing: 0,
+};
+
 const secondaryActionButtonStyle: CSSProperties = {
   border: "1px solid #cfd8e3",
   borderRadius: 10,
@@ -4646,7 +5229,7 @@ const primaryActionButtonStyle: CSSProperties = {
 
 const settingsToolsRowStyle: CSSProperties = {
   display: "grid",
-  gridTemplateColumns: "1fr 1fr",
+  gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
   gap: 8,
 };
 
@@ -4692,10 +5275,57 @@ const curriculumSaveStatusLabelStyle: CSSProperties = {
   fontWeight: 600,
 };
 
-const curriculumWarningsStyle: CSSProperties = {
+const curriculumWarningsButtonStyle: CSSProperties = {
+  border: "1px solid #fdba74",
+  background: "#fff7ed",
+  borderRadius: 999,
+  padding: "2px 10px",
   color: "#b45309",
   fontWeight: 600,
-  cursor: "help",
+  cursor: "pointer",
+  fontSize: 11,
+};
+
+const warningsSummaryStyle: CSSProperties = {
+  fontSize: 12,
+  color: "#92400e",
+  fontWeight: 700,
+  marginBottom: 8,
+};
+
+const warningsListWrapStyle: CSSProperties = {
+  display: "grid",
+  gap: 8,
+  maxHeight: "min(60vh, 520px)",
+  overflowY: "auto",
+  paddingRight: 4,
+};
+
+const warningItemStyle: CSSProperties = {
+  border: "1px solid #fed7aa",
+  background: "#fffbeb",
+  borderRadius: 10,
+  padding: "8px 10px",
+  display: "grid",
+  gap: 4,
+};
+
+const warningPathStyle: CSSProperties = {
+  fontSize: 11,
+  color: "#7c2d12",
+  fontWeight: 700,
+  fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+};
+
+const warningMessageStyle: CSSProperties = {
+  fontSize: 13,
+  color: "#9a3412",
+};
+
+const warningCodeStyle: CSSProperties = {
+  fontSize: 10,
+  color: "#9a3412",
+  fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
 };
 
 const curriculumAutosaveOkHintStyle: CSSProperties = {
@@ -4877,6 +5507,23 @@ const sidebarButtonStyle: CSSProperties = {
   color: "#111827",
 };
 
+const bookExpandToggleStyle: CSSProperties = {
+  border: "1px solid #d0d7e2",
+  borderRadius: 8,
+  width: 30,
+  height: 30,
+  background: "#fff",
+  fontSize: 16,
+  lineHeight: 1,
+  fontWeight: 800,
+  cursor: "pointer",
+  color: "#334155",
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  flexShrink: 0,
+};
+
 const bookCardStyle: CSSProperties = {
   border: "1px solid #dbe3ec",
   borderRadius: 14,
@@ -4952,6 +5599,17 @@ const dangerTinyButtonStyle: CSSProperties = {
   fontWeight: 700,
   cursor: "pointer",
   color: "#b91c1c",
+};
+
+const secondaryTinyButtonStyle: CSSProperties = {
+  border: "1px solid #cbd5e1",
+  borderRadius: 8,
+  padding: "7px 8px",
+  background: "#fff",
+  fontSize: 12,
+  fontWeight: 700,
+  cursor: "pointer",
+  color: "#334155",
 };
 
 const secondaryFullButtonStyle: CSSProperties = {
