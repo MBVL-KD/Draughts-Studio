@@ -2017,6 +2017,25 @@ export default function LessonStudioPage() {
     });
   };
 
+  /**
+   * Copies legacy `LessonStep.presentation` (highlights / arrows / routes drawn on the board)
+   * into the selected authoring moment's `overlays` (same mapping as `stepPresentationToMomentOverlays`).
+   */
+  const handleApplyBoardPresentationToAuthoringMoment = () => {
+    const moment = authoringPresentationMoment;
+    if (!moment || !selectedStep) return;
+    const overlays = stepPresentationToMomentOverlays(selectedStep);
+    const next: StepMoment = {
+      ...moment,
+      overlays: overlays.length > 0 ? overlays : undefined,
+    };
+    if (authoringInspectedBranchId) {
+      applyAuthoringSelectedBranchMoment(next);
+    } else {
+      applyAuthoringSelectedMoment(next);
+    }
+  };
+
   const handleAuthoringTargetSquareToggle = (sq: number) => {
     setAuthoringStudioSquareSelection((prev) =>
       prev.includes(sq) ? prev.filter((x) => x !== sq) : sortUniqueSquares([...prev, sq])
@@ -4384,6 +4403,41 @@ export default function LessonStudioPage() {
                 onCopy={handleCopyAuthoringPresentationRuntime}
                 onPaste={handlePasteAuthoringPresentationRuntime}
               />
+            ) : null}
+            {authoringPresentationMoment && selectedStep ? (
+              <div
+                style={{
+                  marginBottom: 10,
+                  padding: "8px 10px",
+                  background: "#f8fafc",
+                  borderRadius: 8,
+                  border: "1px solid #e2e8f0",
+                }}
+              >
+                <button
+                  type="button"
+                  onClick={handleApplyBoardPresentationToAuthoringMoment}
+                  style={{
+                    border: "1px solid #2563eb",
+                    background: "#fff",
+                    color: "#1d4ed8",
+                    borderRadius: 8,
+                    padding: "8px 12px",
+                    fontSize: 13,
+                    fontWeight: 600,
+                    cursor: "pointer",
+                  }}
+                >
+                  {editorLanguage === "nl"
+                    ? "Bord → moment-overlays"
+                    : "Board → moment overlays"}
+                </button>
+                <p style={{ margin: "8px 0 0", fontSize: 12, color: "#64748b", lineHeight: 1.45 }}>
+                  {editorLanguage === "nl"
+                    ? "Teken highlights, pijlen en routes op het bord (legacy tools). Klik daarna hier om ze op dit moment te zetten. Leeg bord wist de overlays op dit moment."
+                    : "Draw highlights, arrows, and routes on the board (legacy tools), then click here to copy them onto this moment. An empty board clears this moment's overlays."}
+                </p>
+              </div>
             ) : null}
             {authoringPresentationMoment ? (
               <AuthoringMomentPresentationPanel
