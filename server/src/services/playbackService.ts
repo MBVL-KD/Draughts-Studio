@@ -68,13 +68,13 @@ function readLocalizedText(value: LocalizedTextLike | undefined, language: strin
 }
 
 function resolveInitialFen(step: StepLike): string {
-  return (
+  const raw =
     step.initialState?.fen ??
     step.initialState?.startFen ??
     step.initialState?.boardFen ??
     step.initialState?.snapshotFen ??
-    ""
-  );
+    "";
+  return String(raw).trim();
 }
 
 export function buildPlaybackPayload(params: {

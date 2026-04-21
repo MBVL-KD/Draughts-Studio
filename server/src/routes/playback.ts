@@ -130,8 +130,17 @@ playbackRouter.get("/:stepId/playback", async (req: Req, res: Res) => {
         : undefined;
     const source = sourceId ? await getSourceById(owner, sourceId) : undefined;
 
+    const lessonAnyPre = (stepRef.lesson ?? {}) as Record<string, unknown>;
+    const authoringBundlePre = lessonAnyPre.authoringV2 as
+      | { stepsById?: Record<string, unknown> }
+      | undefined;
+    const authoringStepForValidate =
+      (authoringBundlePre?.stepsById?.[stepRef.stepId] as Record<string, unknown> | undefined) ??
+      undefined;
+
     const runtimeValidation = validateStepForRuntimeExport(stepRef.step, source, {
       requiredLanguages,
+      authoringStep: authoringStepForValidate,
     });
     if (!runtimeValidation.ok && !hasAuthoringAskSequence(stepRef.lesson, stepRef.stepId)) {
       throw new ValidationError(
@@ -146,8 +155,7 @@ playbackRouter.get("/:stepId/playback", async (req: Req, res: Res) => {
         ? lesson.variantId.trim()
         : undefined;
 
-    const lessonAny = (stepRef.lesson ?? {}) as Record<string, unknown>;
-    const authoringBundle = lessonAny.authoringV2 as
+    const authoringBundle = lessonAnyPre.authoringV2 as
       | {
           authoringLesson?: { stepIds?: string[] };
           stepsById?: Record<string, unknown>;
@@ -232,8 +240,12 @@ playbackRouter.get(
           ? (step as { sourceRef: { sourceId: string } }).sourceRef.sourceId
           : undefined;
       const source = sourceId ? await getSourceById(owner, sourceId) : undefined;
+      const authoringBundlePre = lesson.authoringV2 as { stepsById?: Record<string, unknown> } | undefined;
+      const authoringStepForValidate =
+        (authoringBundlePre?.stepsById?.[stepId] as Record<string, unknown> | undefined) ?? undefined;
       const runtimeValidation = validateStepForRuntimeExport(step, source, {
         requiredLanguages,
+        authoringStep: authoringStepForValidate,
       });
       if (!runtimeValidation.ok && !hasAuthoringAskSequence(lesson, stepId)) {
         throw new ValidationError(

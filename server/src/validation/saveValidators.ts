@@ -8,9 +8,16 @@ import {
   validateStepSourceRefSemantics,
 } from "./semanticValidators";
 import { validateLocalizedTextDraft, validateLocalizedTextRequired } from "./localizedTextValidators";
+import type { AuthoringStepExportLike } from "../playback/runtimeExportPolicy";
+import {
+  allowsEmptyInitialFenForRuntimeExport,
+  requiresLocalizedFeedbackForRuntimeExport,
+} from "../playback/runtimeExportPolicy";
 
 type RuntimeValidationOptions = {
   requiredLanguages?: string[];
+  /** V2 authoring step (timeline); relaxes FEN / feedback rules for non-interactive flows. */
+  authoringStep?: AuthoringStepExportLike;
 };
 
 type BookLike = {
@@ -19,7 +26,8 @@ type BookLike = {
   lessons?: Array<{
     title?: unknown;
     description?: unknown;
-    steps?: Array<StepLike>;
+    steps?: Array<StepLike & { id?: string; stepId?: string }>;
+    authoringV2?: { stepsById?: Record<string, AuthoringStepExportLike> };
   }>;
 };
 
@@ -47,6 +55,7 @@ type StepLike = {
     npc?: {
       text?: unknown;
     };
+    autoplay?: { moves?: unknown[] };
   };
   validation?: {
     type?: string;
@@ -56,6 +65,7 @@ type StepLike = {
   };
   sourceRef?: {
     sourceId?: string;
+    nodeTimeline?: Array<{ notation?: string; fenAfter?: string }>;
   };
   initialState?: {
     fen?: string;
@@ -202,11 +212,14 @@ export function validateStepForRuntimeExport(
   options?: RuntimeValidationOptions
 ): ValidationResult {
   const issues: ValidationIssue[] = [];
+  const authoringStep = options?.authoringStep;
 
   issues.push(...collectLocalizedRequiredIssues(step.title, "step.title", options));
   issues.push(...collectLocalizedRequiredIssues(step.prompt, "step.prompt", options));
-  issues.push(...collectLocalizedRequiredIssues(step.feedback?.correct, "step.feedback.correct", options));
-  issues.push(...collectLocalizedRequiredIssues(step.feedback?.incorrect, "step.feedback.incorrect", options));
+  if (requiresLocalizedFeedbackForRuntimeExport({ step, authoringStep })) {
+    issues.push(...collectLocalizedRequiredIssues(step.feedback?.correct, "step.feedback.correct", options));
+    issues.push(...collectLocalizedRequiredIssues(step.feedback?.incorrect, "step.feedback.incorrect", options));
+  }
   // Optional NPC copy must not block runtime playback export (Roblox / puzzle tests).
 
   (step.validation?.options ?? []).forEach((option, index) => {
@@ -220,14 +233,15 @@ export function validateStepForRuntimeExport(
   });
 
   const resolvedFen = resolveRuntimeStartFen(step);
-  if (!resolvedFen) {
+  const fenOptional = allowsEmptyInitialFenForRuntimeExport({ step, authoringStep });
+  if (!resolvedFen && !fenOptional) {
     issues.push({
       path: "step.initialState",
       code: "runtime.start_fen.unresolved",
       message: "Runtime start position/FEN is not resolvable",
       severity: "error",
     });
-  } else {
+  } else if (resolvedFen) {
     issues.push(
       ...validateFenParseable(resolvedFen).issues.map((issue) => ({
         ...issue,
@@ -250,10 +264,19 @@ export function validateBookForRuntimeExport(
   const results: ValidationResult[] = [];
 
   (book.lessons ?? []).forEach((lesson) => {
+    const stepsById = lesson.authoringV2?.stepsById;
     (lesson.steps ?? []).forEach((step) => {
       const sourceId = step.sourceRef?.sourceId;
       const source = sourceId && sourceLookup ? sourceLookup(sourceId) : undefined;
-      results.push(validateStepForRuntimeExport(step, source, options));
+      const stepKey = typeof step.stepId === "string" && step.stepId.trim() ? step.stepId.trim() : step.id;
+      const authoringFromBundle =
+        typeof stepKey === "string" && stepsById && stepsById[stepKey] ? stepsById[stepKey] : undefined;
+      results.push(
+        validateStepForRuntimeExport(step, source, {
+          ...options,
+          authoringStep: authoringFromBundle,
+        })
+      );
     });
   });
 
