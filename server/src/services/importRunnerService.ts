@@ -19,7 +19,10 @@ import { appendImportedPuzzleStep } from "./puzzelsImportBooksService";
 import { getImportAdapter } from "../import/adapters";
 import { convertSlagzetItemToLessonStep } from "../import/normalize/slagzetToStep";
 import { applyScanResultToImportedStep } from "../import/normalize/applyScanToImportedStep";
-import { runImportScanAnalysis } from "../engine/importScan/runImportScanAnalysis";
+import {
+  ImportScanTimeoutError,
+  runImportScanAnalysis,
+} from "../engine/importScan/runImportScanAnalysis";
 import { ConflictError } from "../utils/httpErrors";
 import { trimPvToCombinationWindow } from "../import/normalize/parsePvMoves";
 import { resolveNotationLineToStructuredMovesDetailed } from "../playback/resolveNotationLineToStructuredMoves";
@@ -32,8 +35,18 @@ type OwnerContext = {
 type RunAction = "processed" | "completed" | "paused" | "idle" | "failed";
 const MIN_EVAL_ADVANTAGE_FOR_PUZZLE = 0.5;
 const FAST_SCAN_DEPTH = 10;
-const DEEP_SCAN_DEPTH = 25;
-const STALE_PROCESSING_REQUEUE_MS = 90_000;
+/**
+ * Deep scans above ~21 can block the Node process in some WASM bridge cases.
+ * Keep import resilient: never issue depth 22+ here; skip/no-solution items still move on.
+ */
+const DEEP_SCAN_DEPTH_CAP = 21;
+/** Extra scan at combination end FEN: shallow eval for the gate (avoids a second depth-25 call). */
+const COMBO_END_SCAN_DEPTH = 12;
+/**
+ * Import of difficult positions can legitimately take >90s (scrape + scan + save).
+ * Keep stale recovery, but avoid false positives that cause duplicate work.
+ */
+const STALE_PROCESSING_REQUEUE_MS = 10 * 60_000;
 
 export type ImportRunnerResult = {
   action: RunAction;
@@ -81,6 +94,10 @@ function isRecoverableScanError(error: unknown): boolean {
   );
 }
 
+function msSince(startMs: number): number {
+  return Date.now() - startMs;
+}
+
 async function runOptionalImportScan(params: {
   enabled: boolean;
   depth?: number;
@@ -105,6 +122,7 @@ async function runOptionalImportScan(params: {
     const merged = applyScanResultToImportedStep(params.step as any, scanResult);
     return { scanResult, step: merged as Record<string, any> };
   } catch (error) {
+    if (error instanceof ImportScanTimeoutError) throw error;
     if (!isRecoverableScanError(error)) throw error;
     return undefined;
   }
@@ -140,21 +158,39 @@ async function evaluateCombinationEndPosition(params: {
   const endFen = resolved.moves[resolved.moves.length - 1]?.fenAfter;
   if (typeof endFen !== "string" || !endFen.trim()) return null;
 
-  const endScan = await runImportScanAnalysis({
-    variantId: params.variantId,
-    fen: endFen,
-    depth: params.depth,
-    multiPv: params.multiPv,
-  });
-  const endEval = Number(endScan.evaluation);
-  return Number.isFinite(endEval) ? endEval : null;
+  const comboDepth = Math.min(
+    Math.max(1, Math.floor(params.depth)),
+    COMBO_END_SCAN_DEPTH
+  );
+  try {
+    const endScan = await runImportScanAnalysis({
+      variantId: params.variantId,
+      fen: endFen,
+      depth: comboDepth,
+      multiPv: params.multiPv,
+    });
+    const endEval = Number(endScan.evaluation);
+    return Number.isFinite(endEval) ? endEval : null;
+  } catch (error) {
+    if (error instanceof ImportScanTimeoutError) return null;
+    throw error;
+  }
 }
 
 export async function runImportJobOnce(
   owner: OwnerContext,
   jobId: string
 ): Promise<ImportRunnerResult> {
-  await resetStaleProcessingItems(owner, jobId, STALE_PROCESSING_REQUEUE_MS);
+  const staleReset = await resetStaleProcessingItems(
+    owner,
+    jobId,
+    STALE_PROCESSING_REQUEUE_MS
+  );
+  if ((staleReset.modifiedCount ?? 0) > 0) {
+    console.warn(
+      `[import-run] auto-skipped stale processing items job=${jobId} count=${staleReset.modifiedCount}`
+    );
+  }
   const job = await getImportJobById(owner, jobId);
   if (job.status === "paused") {
     return { action: "paused", jobId, counters: toCounterSnapshot(job), message: "Job is paused" };
@@ -226,13 +262,29 @@ export async function runImportJobOnce(
   }
 
   try {
+    const startedAt = Date.now();
+    let scrapeMs = 0;
+    let normalizeMs = 0;
+    let fastScanMs = 0;
+    let deepScanMs = 0;
+    let comboScanMs = 0;
+    let appendMs = 0;
+    let markDoneMs = 0;
+    let progressMs = 0;
+    console.info(
+      `[import-run] start item job=${jobId} index=${pendingItem.index} itemId=${processingItem.itemId} url=${String(processingItem.fragmentUrl ?? "").slice(0, 120)}`
+    );
     const adapter = getImportAdapter(job.sourceType);
+    const scrapeStartedAt = Date.now();
     const scrapedItem = await adapter.scrapeCollectionItem(processingItem.fragmentUrl);
+    scrapeMs = msSince(scrapeStartedAt);
+    const normalizeStartedAt = Date.now();
     let step: Record<string, any> = convertSlagzetItemToLessonStep({
       job: job as any,
       item: processingItem as any,
       scrapedItem,
     });
+    normalizeMs = msSince(normalizeStartedAt);
 
     const scanEnabled = Boolean(job.scanConfig?.enabled);
     const variantId = "international";
@@ -241,8 +293,9 @@ export async function runImportJobOnce(
         ? Math.max(1, Math.floor(job.scanConfig.depth))
         : FAST_SCAN_DEPTH;
     const fastDepth = Math.min(configuredDepth, FAST_SCAN_DEPTH);
-    const deepDepth = Math.max(configuredDepth, DEEP_SCAN_DEPTH);
+    const deepDepth = Math.min(Math.max(configuredDepth, fastDepth + 2), DEEP_SCAN_DEPTH_CAP);
 
+    const fastScanStartedAt = Date.now();
     let scanBundle = await runOptionalImportScan({
       enabled: scanEnabled,
       depth: fastDepth,
@@ -250,6 +303,7 @@ export async function runImportJobOnce(
       step,
       variantId,
     });
+    fastScanMs = msSince(fastScanStartedAt);
     let scanResult: ImportScanResult | undefined;
     if (scanBundle) {
       step = scanBundle.step;
@@ -261,7 +315,7 @@ export async function runImportJobOnce(
     let hasStrongSideAdvantage =
       Number.isFinite(evalValue) && hasStrongStarterAdvantage(evalValue, starterSide);
 
-    // Two-pass scan: fast depth first, deep (>=25) only when eval gate would skip.
+    // Two-pass scan: fast depth first, deeper pass when eval gate would skip (depth capped; may time out).
     if (
       scanEnabled &&
       scanBundle &&
@@ -269,26 +323,60 @@ export async function runImportJobOnce(
       !hasStrongSideAdvantage &&
       deepDepth > fastDepth
     ) {
-      const deepBundle = await runOptionalImportScan({
-        enabled: true,
-        depth: deepDepth,
-        multiPv: job.scanConfig?.multiPv,
-        step,
-        variantId,
-      });
-      if (deepBundle) {
-        scanBundle = deepBundle;
-        step = deepBundle.step;
-        scanResult = deepBundle.scanResult;
-        const deepEval = Number(scanResult?.evaluation);
-        hasStrongSideAdvantage =
-          Number.isFinite(deepEval) && hasStrongStarterAdvantage(deepEval, starterSide);
+      try {
+        const deepScanStartedAt = Date.now();
+        const deepBundle = await runOptionalImportScan({
+          enabled: true,
+          depth: deepDepth,
+          multiPv: job.scanConfig?.multiPv,
+          step,
+          variantId,
+        });
+        deepScanMs = msSince(deepScanStartedAt);
+        if (deepBundle) {
+          scanBundle = deepBundle;
+          step = deepBundle.step;
+          scanResult = deepBundle.scanResult;
+          const deepEval = Number(scanResult?.evaluation);
+          hasStrongSideAdvantage =
+            Number.isFinite(deepEval) && hasStrongStarterAdvantage(deepEval, starterSide);
+        }
+      } catch (error) {
+        if (error instanceof ImportScanTimeoutError) {
+          const skippedItem = await markItemSkipped(
+            owner,
+            processingItem.itemId,
+            {
+              reason: `Skipped: deep scan timed out after 5s at depth ${deepDepth} (no result in time).`,
+              scanResult,
+            },
+            processingItem.revision
+          );
+          const progressed = await incrementJobProgress(
+            owner,
+            jobId,
+            {
+              processedItemsInc: 1,
+              currentIndex: pendingItem.index,
+            },
+            job.revision
+          );
+          return {
+            action: "processed",
+            jobId,
+            itemId: skippedItem.itemId,
+            counters: toCounterSnapshot(progressed),
+            message: `Deep scan timeout at depth ${deepDepth}`,
+          };
+        }
+        throw error;
       }
     }
 
     let endCombinationEval: number | null = null;
     if (scanEnabled && scanBundle && !hasStrongSideAdvantage) {
       try {
+        const comboScanStartedAt = Date.now();
         endCombinationEval = await evaluateCombinationEndPosition({
           enabled: true,
           variantId,
@@ -297,6 +385,7 @@ export async function runImportJobOnce(
           depth: deepDepth,
           multiPv: job.scanConfig?.multiPv,
         });
+        comboScanMs = msSince(comboScanStartedAt);
         if (Number.isFinite(endCombinationEval)) {
           hasStrongSideAdvantage = hasStrongStarterAdvantage(endCombinationEval, starterSide);
         }
@@ -341,7 +430,9 @@ export async function runImportJobOnce(
       };
     }
 
+    const appendStartedAt = Date.now();
     const appended = await appendImportedPuzzleStep(owner, job as any, step);
+    appendMs = msSince(appendStartedAt);
     if (appended.skipped) {
       const skippedItem = await markItemSkipped(
         owner,
@@ -366,6 +457,7 @@ export async function runImportJobOnce(
         message: appended.skipReason ?? "Skipped: no valid sequence",
       };
     }
+    const markDoneStartedAt = Date.now();
     const doneItem = await markItemDone(
       owner,
       processingItem.itemId,
@@ -376,7 +468,9 @@ export async function runImportJobOnce(
       },
       processingItem.revision
     );
+    markDoneMs = msSince(markDoneStartedAt);
 
+    const progressStartedAt = Date.now();
     const progressed = await incrementJobProgress(
       owner,
       jobId,
@@ -386,6 +480,10 @@ export async function runImportJobOnce(
         currentIndex: pendingItem.index,
       },
       job.revision
+    );
+    progressMs = msSince(progressStartedAt);
+    console.info(
+      `[import-run] timing job=${jobId} index=${pendingItem.index} totalMs=${msSince(startedAt)} scrapeMs=${scrapeMs} normalizeMs=${normalizeMs} fastScanMs=${fastScanMs} deepScanMs=${deepScanMs} comboScanMs=${comboScanMs} appendMs=${appendMs} markDoneMs=${markDoneMs} progressMs=${progressMs}`
     );
 
     return {
@@ -475,6 +573,11 @@ export async function runImportJobUntilStopped(
     const result = await runImportJobOnce(owner, jobId);
     results.push(result);
     processed += 1;
+    const c = result.counters;
+    const progress = c ? `${c.processedItems}/${c.totalItems}` : "?/?";
+    console.info(
+      `[import-run] result job=${jobId} action=${result.action} progress=${progress} itemId=${result.itemId ?? "-"} msg=${result.message ?? ""}`
+    );
 
     if (result.action === "paused" || result.action === "completed" || result.action === "idle") {
       break;

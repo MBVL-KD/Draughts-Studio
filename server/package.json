@@ -11,8 +11,11 @@
     "reseed:imported-puzzle-ratings": "node src/scripts/reseedImportedPuzzleRatings.js",
     "repair:imported-puzzles": "ts-node src/scripts/repairImportedPuzzleMismatches.ts",
     "remove:empty-imported-puzzles": "ts-node src/scripts/removeEmptyImportedPuzzles.ts",
+    "split:large-puzzels-books": "ts-node src/scripts/splitLargePuzzelsBooks.ts",
     "audit:empty-puzzle-steps": "node src/scripts/auditEmptyPuzzleSteps.js",
-    "backfill:book-access-defaults": "node src/scripts/backfillBookAccessDefaults.js"
+    "backfill:book-access-defaults": "node src/scripts/backfillBookAccessDefaults.js",
+    "translate:missing-i18n": "node src/scripts/autoTranslateMissingLocalizedTexts.js",
+    "translate:missing-i18n:dry": "node src/scripts/autoTranslateMissingLocalizedTexts.js --dry-run"
   },
   "keywords": [],
   "author": "",

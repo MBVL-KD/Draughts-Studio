@@ -14,10 +14,14 @@ type ListQuery = {
   search?: string;
   status?: string;
   tag?: string;
+  includeImport?: boolean;
+  compactImport?: boolean;
   limit?: number;
   offset?: number;
   sort?: "updatedAt_desc" | "updatedAt_asc";
 };
+
+const PUZZELS_IMPORT_TAG = "puzzels-import";
 
 type LessonLike = {
   id?: string;
@@ -86,14 +90,13 @@ export async function getBookById(owner: OwnerContext, bookId: string) {
 
 export async function listBooks(owner: OwnerContext, query?: ListQuery) {
   const { limit, offset } = clampPagination(query);
-  const filter: Record<string, unknown> = {
+  const baseFilter: Record<string, unknown> = {
     ...withOwnerFilter(owner),
   };
 
-  if (query?.status) filter.status = query.status;
-  if (query?.tag) filter.tags = query.tag;
+  if (query?.status) baseFilter.status = query.status;
   if (query?.search?.trim()) {
-    filter.$or = [
+    baseFilter.$or = [
       { "title.values.en": { $regex: query.search, $options: "i" } },
       { "title.values.nl": { $regex: query.search, $options: "i" } },
     ];
@@ -101,7 +104,38 @@ export async function listBooks(owner: OwnerContext, query?: ListQuery) {
 
   const sort = query?.sort === "updatedAt_asc" ? { updatedAt: 1 } : { updatedAt: -1 };
 
-  return BookModel.find(filter).sort(sort).skip(offset).limit(limit).lean();
+  if (query?.tag) {
+    return BookModel.find({ ...baseFilter, tags: query.tag })
+      .sort(sort)
+      .skip(offset)
+      .limit(limit)
+      .lean();
+  }
+
+  if (query?.includeImport !== true) {
+    return BookModel.find({ ...baseFilter, tags: { $nin: [PUZZELS_IMPORT_TAG] } })
+      .sort(sort)
+      .skip(offset)
+      .limit(limit)
+      .lean();
+  }
+
+  if (query?.compactImport === true) {
+    const [normalBooks, importBooksCompact] = await Promise.all([
+      BookModel.find({ ...baseFilter, tags: { $nin: [PUZZELS_IMPORT_TAG] } }).lean(),
+      BookModel.find({ ...baseFilter, tags: PUZZELS_IMPORT_TAG })
+        .select("-lessons -exams")
+        .lean(),
+    ]);
+    const merged = [...normalBooks, ...importBooksCompact].sort((a, b) => {
+      const at = new Date((a as Record<string, unknown>).updatedAt as string).getTime();
+      const bt = new Date((b as Record<string, unknown>).updatedAt as string).getTime();
+      return sort.updatedAt === 1 ? at - bt : bt - at;
+    });
+    return merged.slice(offset, offset + limit);
+  }
+
+  return BookModel.find(baseFilter).sort(sort).skip(offset).limit(limit).lean();
 }
 
 export async function createBook(owner: OwnerContext, document: BookLike) {
@@ -246,6 +280,42 @@ export async function updateStepInBook(
     },
     expectedRevision
   );
+}
+
+export async function patchLessonInBook(
+  owner: OwnerContext,
+  bookId: string,
+  lessonId: string,
+  nextLesson: Record<string, unknown>,
+  expectedRevision: number
+) {
+  const updated = await BookModel.findOneAndUpdate(
+    {
+      ...withOwnerFilter(owner),
+      bookId,
+      revision: expectedRevision,
+      $or: [{ "lessons.lessonId": lessonId }, { "lessons.id": lessonId }],
+    },
+    {
+      $set: {
+        "lessons.$": nextLesson,
+        updatedAt: new Date(),
+      },
+      $inc: { revision: 1 },
+    },
+    { returnDocument: "after" }
+  ).lean();
+
+  if (!updated) {
+    const exists = await BookModel.exists({
+      ...withOwnerFilter(owner),
+      bookId,
+    });
+    if (!exists) throw new NotFoundError("Book not found");
+    throw new ConflictError("Book revision conflict");
+  }
+
+  return updated;
 }
 
 export async function findStepRef(owner: OwnerContext, stepId: string) {

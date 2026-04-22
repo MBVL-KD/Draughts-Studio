@@ -3,6 +3,7 @@ import {
   createBook,
   getBookById,
   listBooks,
+  patchLessonInBook,
   patchBook,
 } from "../repositories/bookRepository";
 import { NotFoundError } from "../utils/httpErrors";
@@ -21,6 +22,9 @@ type OwnerContext = {
 export const PUZZELS_BOOK_TAG = "puzzels-import";
 
 const MAX_COLLECTION_TITLE_LEN = 200;
+const MAX_STEPS_PER_LESSON = 220;
+const MAX_TOTAL_STEPS_PER_BOOK = 900;
+const MAX_BOOK_BYTES_FOR_IMPORT_APPEND = 1_200_000;
 
 /**
  * One book per owner: title "Puzzels", tagged for lookup.
@@ -58,6 +62,109 @@ export async function ensurePuzzelsBook(owner: OwnerContext): Promise<string> {
   return getBookAppId(created as Record<string, unknown>);
 }
 
+function normalizeText(value: unknown): string {
+  return typeof value === "string" ? value.replace(/\s+/g, " ").trim() : "";
+}
+
+function getBookTitle(book: Record<string, unknown>): string {
+  const title = book.title as { values?: Record<string, string> } | undefined;
+  return normalizeText(title?.values?.nl || title?.values?.en || "");
+}
+
+function countLessonSteps(lesson: Record<string, unknown>): number {
+  const authoring = lesson.authoringV2 as Record<string, unknown> | undefined;
+  const authoringLesson = authoring?.authoringLesson as Record<string, unknown> | undefined;
+  const stepIds = Array.isArray(authoringLesson?.stepIds) ? authoringLesson.stepIds : null;
+  if (stepIds) return stepIds.length;
+  return Array.isArray(lesson.steps) ? lesson.steps.length : 0;
+}
+
+function countBookSteps(book: Record<string, unknown>): number {
+  const lessons = Array.isArray(book.lessons) ? (book.lessons as Record<string, unknown>[]) : [];
+  return lessons.reduce((sum, lesson) => sum + countLessonSteps(lesson), 0);
+}
+
+function toFiniteSequenceIndex(value: unknown): number | null {
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.trunc(n) : null;
+}
+
+function maxPuzzleBookSequenceIndex(books: Record<string, unknown>[]): number {
+  let max = 0;
+  for (const book of books) {
+    const seq = toFiniteSequenceIndex(book.sequenceIndex);
+    if (seq !== null && seq > max) max = seq;
+  }
+  return max;
+}
+
+function isBookWithinImportCapacity(book: Record<string, unknown>): boolean {
+  const bytes = Buffer.byteLength(JSON.stringify(book));
+  const steps = countBookSteps(book);
+  return bytes < MAX_BOOK_BYTES_FOR_IMPORT_APPEND && steps < MAX_TOTAL_STEPS_PER_BOOK;
+}
+
+function normalizeCollectionBaseLabel(collectionTitle: string): string {
+  return normalizeCollectionTitle(collectionTitle);
+}
+
+function parseCollectionPartNumber(title: string, baseLabel: string): number {
+  const normalized = normalizeText(title);
+  if (!normalized) return -1;
+  if (normalized === baseLabel) return 1;
+  const escaped = baseLabel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const m = normalized.match(new RegExp(`^${escaped}\\s+\\(part\\s+(\\d+)\\)$`, "i"));
+  if (!m) return -1;
+  const n = Number(m[1]);
+  return Number.isFinite(n) && n >= 1 ? Math.floor(n) : -1;
+}
+
+function buildCollectionLessonTitle(baseLabel: string, part: number): string {
+  return part <= 1 ? baseLabel : `${baseLabel} (part ${part})`;
+}
+
+async function choosePuzzelsBookForAppend(owner: OwnerContext): Promise<Record<string, unknown>> {
+  const books = await listBooks(owner, {
+    tag: PUZZELS_BOOK_TAG,
+    limit: 200,
+    sort: "updatedAt_desc",
+  });
+  const puzzleBooks = (Array.isArray(books) ? books : []).map(
+    (b) => b as unknown as Record<string, unknown>
+  );
+  const candidate = puzzleBooks.find((book) => isBookWithinImportCapacity(book));
+  if (candidate) return candidate;
+
+  const nextSequenceIndex = maxPuzzleBookSequenceIndex(puzzleBooks) + 1;
+  const nextIndex = puzzleBooks.length + 1;
+  const suffix = nextIndex <= 1 ? "" : ` ${nextIndex}`;
+  const bookId = randomUUID();
+  const created = await createBook(owner, {
+    id: bookId,
+    bookId,
+    schemaVersion: 1,
+    revision: 1,
+    title: {
+      values: {
+        en: `Puzzles${suffix}`,
+        nl: `Puzzels${suffix}`,
+      },
+    },
+    description: {
+      values: {
+        en: "Imported puzzles (Slagzet). Split into multiple books for performance.",
+        nl: "Geimporteerde puzzels (Slagzet). Opgesplitst over meerdere boeken voor performance.",
+      },
+    },
+    status: "draft",
+    sequenceIndex: nextSequenceIndex,
+    tags: [PUZZELS_BOOK_TAG],
+    lessons: [],
+    exams: [],
+  } as Record<string, unknown>);
+  return created as unknown as Record<string, unknown>;
+}
+
 function normalizeCollectionTitle(raw: string): string {
   const t = raw.replace(/\s+/g, " ").trim().slice(0, MAX_COLLECTION_TITLE_LEN);
   return t.length > 0 ? t : "Collectie";
@@ -71,7 +178,7 @@ export async function ensureCollectionLesson(
   bookId: string,
   collectionTitle: string
 ): Promise<string> {
-  const titleNorm = normalizeCollectionTitle(collectionTitle);
+  const titleNorm = normalizeCollectionBaseLabel(collectionTitle);
   let book = await getBookById(owner, bookId);
   if (!book) throw new NotFoundError("Puzzels book not found");
 
@@ -79,21 +186,32 @@ export async function ensureCollectionLesson(
     ? ([...(book as any).lessons] as Record<string, unknown>[])
     : [];
 
-  const existing = lessons.find((l) => {
-    const values = (l.title as { values?: Record<string, string> })?.values;
-    const en = values?.en?.trim();
-    const nl = values?.nl?.trim();
-    return en === titleNorm || nl === titleNorm;
-  });
-  if (existing) {
-    return getLessonAppId(existing as Record<string, unknown>);
+  const matchingLessons = lessons
+    .map((lesson) => {
+      const values = (lesson.title as { values?: Record<string, string> })?.values;
+      const label = normalizeText(values?.nl || values?.en || "");
+      const part = parseCollectionPartNumber(label, titleNorm);
+      if (part < 1) return null;
+      return { lesson, part };
+    })
+    .filter((row): row is { lesson: Record<string, unknown>; part: number } => !!row)
+    .sort((a, b) => a.part - b.part);
+
+  const reusable = matchingLessons.find((row) => countLessonSteps(row.lesson) < MAX_STEPS_PER_LESSON);
+  if (reusable) {
+    return getLessonAppId(reusable.lesson as Record<string, unknown>);
   }
 
+  const nextPart =
+    matchingLessons.length > 0
+      ? matchingLessons[matchingLessons.length - 1].part + 1
+      : 1;
+  const lessonTitle = buildCollectionLessonTitle(titleNorm, nextPart);
   const lessonId = randomUUID();
   lessons.push({
     id: lessonId,
     lessonId,
-    title: { values: { en: titleNorm, nl: titleNorm } },
+    title: { values: { en: lessonTitle, nl: lessonTitle } },
     description: { values: { en: "", nl: "" } },
     steps: [],
     variantId: "international",
@@ -126,7 +244,8 @@ export async function appendImportedPuzzleStep(
   updatedLesson: Record<string, unknown>;
   importedStep: Record<string, unknown>;
 }> {
-  const bookId = await ensurePuzzelsBook(owner);
+  const selectedBook = await choosePuzzelsBookForAppend(owner);
+  const bookId = getBookAppId(selectedBook as Record<string, unknown>);
   const collectionName =
     (typeof job.collectionTitle === "string" && job.collectionTitle.trim()
       ? job.collectionTitle
@@ -243,15 +362,31 @@ export async function appendImportedPuzzleStep(
   };
   lessons[lessonIndex] = updatedLesson;
 
-  const updatedBook = await patchBook(
-    owner,
-    bookId,
-    {
-      ...(book as any),
-      lessons,
-    },
-    Number((book as any).revision ?? 0)
-  );
+  let updatedBook: Record<string, unknown>;
+  try {
+    updatedBook = (await patchLessonInBook(
+      owner,
+      bookId,
+      targetLessonId,
+      updatedLesson as Record<string, unknown>,
+      Number((book as any).revision ?? 0)
+    )) as Record<string, unknown>;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!message.toLowerCase().includes("positional operator did not find the match")) {
+      throw error;
+    }
+    // Rare race/shape edge-case: fallback to full patch to keep import moving.
+    updatedBook = (await patchBook(
+      owner,
+      bookId,
+      {
+        ...(book as any),
+        lessons,
+      },
+      Number((book as any).revision ?? 0)
+    )) as Record<string, unknown>;
+  }
 
   const importedStub =
     syncedSteps.find(

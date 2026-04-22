@@ -71,7 +71,11 @@ import type {
   SourceMetadata,
   SourceKind,
 } from "../types/analysisTypes";
-import { listBooks } from "../api/booksApi";
+import {
+  autoTranslateMissingI18n,
+  getBook,
+  listBooks,
+} from "../api/booksApi";
 import { persistCurriculumBookDocument } from "../api/lessonStorageApi";
 import { createSource, listSources, patchSource } from "../api/sourcesApi";
 import { getStepPlayback } from "../api/playbackApi";
@@ -551,6 +555,27 @@ function formatApiError(error: ApiError | undefined, fallback: string): string {
   return `${base} — ${top}`;
 }
 
+function SidebarTrashIcon() {
+  return (
+    <svg
+      width={16}
+      height={16}
+      viewBox="0 0 24 24"
+      fill="none"
+      aria-hidden
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <polyline points="3 6 5 6 21 6" />
+      <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+      <line x1="10" y1="11" x2="10" y2="17" />
+      <line x1="14" y1="11" x2="14" y2="17" />
+    </svg>
+  );
+}
+
 export default function LessonStudioPage() {
   const [editorLanguage, setEditorLanguage] = useState<LanguageCode>(() => {
     const value = readStoredString("studio.editorLanguage", "nl");
@@ -671,6 +696,7 @@ export default function LessonStudioPage() {
   selectedBookIdRef.current = selectedBookId;
   const bookRevisionsRef = useRef(bookRevisions);
   bookRevisionsRef.current = bookRevisions;
+  const compactImportHydratingRef = useRef<Record<string, boolean>>({});
 
   const [autosaveBusy, setAutosaveBusy] = useState(false);
   const [autosaveHint, setAutosaveHint] = useState("");
@@ -678,18 +704,69 @@ export default function LessonStudioPage() {
   const [currentBrush, setCurrentBrush] = useState<PieceCode | "eraser">("wm");
   const [mainTab, setMainTab] = useState<MainTab>("editor");
   const [translationsImportJson, setTranslationsImportJson] = useState("");
+  const [autoTranslateBusy, setAutoTranslateBusy] = useState(false);
+  const [bookDeliveryPanelOpen, setBookDeliveryPanelOpen] = useState(false);
+  const [expandedBookIds, setExpandedBookIds] = useState<Record<string, boolean>>({});
 
   const visibleBooks = useMemo(() => {
-    const filtered = books.filter((book) =>
-      book.lessons.some((lesson) => (lesson.variantId ?? activeVariant) === activeVariant)
-    );
-    return filtered.length > 0 ? filtered : books;
-  }, [books, activeVariant]);
+    const filtered = books.filter((book) => {
+      const compactImport = (book as Book & { isCompactImport?: boolean }).isCompactImport;
+      if (compactImport === true) return true;
+      return book.lessons.some(
+        (lesson) => (lesson.variantId ?? activeVariant) === activeVariant
+      );
+    });
+    const base = filtered.length > 0 ? filtered : books;
+    const list = [...base];
+    list.sort((a, b) => {
+      const ia =
+        typeof a.sequenceIndex === "number" && Number.isFinite(a.sequenceIndex)
+          ? a.sequenceIndex
+          : 999_999;
+      const ib =
+        typeof b.sequenceIndex === "number" && Number.isFinite(b.sequenceIndex)
+          ? b.sequenceIndex
+          : 999_999;
+      if (ia !== ib) return ia - ib;
+      return readLocalizedText(a.title, editorLanguage).localeCompare(
+        readLocalizedText(b.title, editorLanguage),
+        undefined,
+        { sensitivity: "base" }
+      );
+    });
+    return list;
+  }, [books, activeVariant, editorLanguage]);
 
   const selectedBook = useMemo(
     () => visibleBooks.find((book) => book.id === selectedBookId) ?? null,
     [visibleBooks, selectedBookId]
   );
+
+  useEffect(() => {
+    const book = selectedBook as (Book & { isCompactImport?: boolean }) | null;
+    if (!book || book.isCompactImport !== true) return;
+    const bookId = getDocumentId(book);
+    if (!bookId) return;
+    if (compactImportHydratingRef.current[bookId]) return;
+    compactImportHydratingRef.current[bookId] = true;
+    void getBook(bookId)
+      .then((response) => {
+        const hydrated = normalizeBookFromServer(response.item);
+        setBooks((prev) =>
+          prev.map((item) => (getDocumentId(item) === bookId ? hydrated : item))
+        );
+        setBookRevisions((prev) => ({
+          ...prev,
+          [bookId]: getDocumentRevision(hydrated),
+        }));
+      })
+      .catch(() => {
+        // Keep compact row visible; user can retry with Load.
+      })
+      .finally(() => {
+        compactImportHydratingRef.current[bookId] = false;
+      });
+  }, [selectedBook]);
 
   const curriculumPersistPreview = useMemo(() => {
     if (!selectedBook) return null;
@@ -1237,7 +1314,12 @@ export default function LessonStudioPage() {
     setSyncMessage("");
     try {
       const [booksResponse, sourcesResponse] = await Promise.all([
-        listBooks({ sort: "updatedAt_desc", limit: 200 }),
+        listBooks({
+          sort: "updatedAt_desc",
+          limit: 50,
+          includeImport: true,
+          compactImport: true,
+        }),
         listSources({ sort: "updatedAt_desc", limit: 400 }),
       ]);
       const nextBooks = asArray<Book>(booksResponse?.items).map(normalizeBookFromServer);
@@ -1351,20 +1433,17 @@ export default function LessonStudioPage() {
     setSyncMessage("");
     try {
       if (conflictState.kind === "book") {
-        const response = await listBooks({ sort: "updatedAt_desc", limit: 200 });
-        const raw = response.items.find((item) => getDocumentId(item) === conflictState.id);
-        if (raw) {
-          const book = normalizeBookFromServer(raw);
-          curriculumSnapshotRef.current[conflictState.id] = stableStringifyBookForSnapshot(
-            normalizeBookForSave(book)
-          );
-          setBooks((prev) => prev.map((item) => (getDocumentId(item) === conflictState.id ? book : item)));
-          setBookRevisions((prev) => ({
-            ...prev,
-            [conflictState.id]: getDocumentRevision(book),
-          }));
-          setCurriculumSaveStatus("saved");
-        }
+        const response = await getBook(conflictState.id);
+        const book = normalizeBookFromServer(response.item);
+        curriculumSnapshotRef.current[conflictState.id] = stableStringifyBookForSnapshot(
+          normalizeBookForSave(book)
+        );
+        setBooks((prev) => prev.map((item) => (getDocumentId(item) === conflictState.id ? book : item)));
+        setBookRevisions((prev) => ({
+          ...prev,
+          [conflictState.id]: getDocumentRevision(book),
+        }));
+        setCurriculumSaveStatus("saved");
       } else {
         const response = await listSources({ sort: "updatedAt_desc", limit: 400 });
         const source = response.items.find((item) => getDocumentId(item) === conflictState.id);
@@ -1500,6 +1579,43 @@ export default function LessonStudioPage() {
       const message = error instanceof Error ? error.message : "Invalid JSON payload.";
       setSyncError(`Failed to apply imported translations: ${message}`);
       setSyncMessage("");
+    }
+  };
+
+  const handleAutoTranslateMissing = async () => {
+    setSyncError("");
+    setSyncMessage("");
+    setAutoTranslateBusy(true);
+    try {
+      const { item: result } = await autoTranslateMissingI18n(false);
+      const summaryNl = `Auto-vertalen afgerond (${result.updatedBooks} boeken bijgewerkt, ${result.filledEnCount} EN / ${result.filledNlCount} NL velden).`;
+      const summaryEn = `Auto-translate finished (${result.updatedBooks} books updated, ${result.filledEnCount} EN / ${result.filledNlCount} NL fields).`;
+      const summary = editorLanguage === "nl" ? summaryNl : summaryEn;
+      if (selectedBookId) {
+        try {
+          const bookRes = await getBook(selectedBookId);
+          const storedBook = normalizeBookFromServer(bookRes.item);
+          applyStoredCurriculumBook(storedBook, selectedBookId);
+          setSyncMessage(
+            `${summary} ${editorLanguage === "nl" ? "Huidig boek vernieuwd." : "Current book refreshed."}`
+          );
+        } catch {
+          setSyncMessage(
+            `${summary} ${
+              editorLanguage === "nl"
+                ? "Open dit boek opnieuw van de server om wijzigingen te zien."
+                : "Re-open this book from the server to see changes."
+            }`
+          );
+        }
+      } else {
+        setSyncMessage(summary);
+      }
+    } catch (error) {
+      const apiError = error as ApiError;
+      setSyncError(formatApiError(apiError, "Auto-translate failed."));
+    } finally {
+      setAutoTranslateBusy(false);
     }
   };
 
@@ -3252,7 +3368,7 @@ export default function LessonStudioPage() {
     workspaceTab === "curriculum"
       ? {
           ...rootStyle,
-          gridTemplateRows: "224px minmax(0, 1fr)",
+          gridTemplateRows: "minmax(224px, min-content) minmax(0, 1fr)",
         }
       : workspaceTab === "imports"
       ? {
@@ -3483,48 +3599,259 @@ export default function LessonStudioPage() {
             </div>
 
             {workspaceTab === "curriculum" ? (
-              <div style={titleGridStyle}>
-                <input
-                  value={
-                    selectedBook
-                      ? readLocalizedText(selectedBook.title, editorLanguage)
-                      : ""
-                  }
-                  onChange={(e) => handleRenameBook(e.target.value)}
-                  placeholder={editorLanguage === "nl" ? "Boektitel" : "Book title"}
-                  style={bookTitleInputStyle}
-                  disabled={!selectedBook}
-                />
-
-                <div style={inlineRowStyle}>
+              <div style={curriculumHeaderCardStyle}>
+                <div style={titleGridStyle}>
                   <input
                     value={
-                      selectedLesson
-                        ? readLocalizedText(selectedLesson.title, editorLanguage)
+                      selectedBook
+                        ? readLocalizedText(selectedBook.title, editorLanguage)
                         : ""
                     }
-                    onChange={(e) => handleRenameLesson(e.target.value)}
-                    placeholder={editorLanguage === "nl" ? "Lestitel" : "Lesson title"}
-                    style={lessonTitleInputStyle}
-                    disabled={!selectedLesson}
+                    onChange={(e) => handleRenameBook(e.target.value)}
+                    placeholder={editorLanguage === "nl" ? "Boektitel" : "Book title"}
+                    style={bookTitleInputStyle}
+                    disabled={!selectedBook}
                   />
 
-                  <input
-                    value={
-                      selectedLesson
-                        ? readLocalizedText(selectedLesson.description, editorLanguage)
-                        : ""
-                    }
-                    onChange={(e) => handleLessonDescriptionChange(e.target.value)}
-                    placeholder={
-                      editorLanguage === "nl"
-                        ? "Korte lesbeschrijving"
-                        : "Short lesson description"
-                    }
-                    style={compactInputStyle}
-                    disabled={!selectedLesson}
-                  />
+                  <div style={inlineRowStyle}>
+                    <input
+                      value={
+                        selectedLesson
+                          ? readLocalizedText(selectedLesson.title, editorLanguage)
+                          : ""
+                      }
+                      onChange={(e) => handleRenameLesson(e.target.value)}
+                      placeholder={editorLanguage === "nl" ? "Lestitel" : "Lesson title"}
+                      style={lessonTitleInputStyle}
+                      disabled={!selectedLesson}
+                    />
+
+                    <input
+                      value={
+                        selectedLesson
+                          ? readLocalizedText(selectedLesson.description, editorLanguage)
+                          : ""
+                      }
+                      onChange={(e) => handleLessonDescriptionChange(e.target.value)}
+                      placeholder={
+                        editorLanguage === "nl"
+                          ? "Korte lesbeschrijving"
+                          : "Short lesson description"
+                      }
+                      style={compactInputStyle}
+                      disabled={!selectedLesson}
+                    />
+                  </div>
                 </div>
+                {selectedBook ? (
+                  <div style={bookDeliveryBarStyle}>
+                    <button
+                      type="button"
+                      onClick={() => setBookDeliveryPanelOpen((v) => !v)}
+                      style={bookDeliveryToggleStyle}
+                    >
+                      {bookDeliveryPanelOpen ? "▼" : "▶"}{" "}
+                      {editorLanguage === "nl"
+                        ? "Volgorde, shop & locks"
+                        : "Sequence, shop & locks"}
+                    </button>
+                    {bookDeliveryPanelOpen ? (
+                      <div style={bookDeliveryGridStyle}>
+                        <label style={bookDeliveryLabelStyle}>
+                          {editorLanguage === "nl" ? "Sequence-index" : "Sequence index"}
+                          <input
+                            type="number"
+                            value={
+                              typeof selectedBook.sequenceIndex === "number" &&
+                              Number.isFinite(selectedBook.sequenceIndex)
+                                ? selectedBook.sequenceIndex
+                                : ""
+                            }
+                            onChange={(e) => {
+                              const raw = e.target.value.trim();
+                              updateSelectedBook((book) => {
+                                if (raw === "") {
+                                  const { sequenceIndex: _omit, ...rest } = book;
+                                  return rest as Book;
+                                }
+                                const n = Number(raw);
+                                if (!Number.isFinite(n)) return book;
+                                return { ...book, sequenceIndex: Math.floor(n) };
+                              });
+                            }}
+                            placeholder="0"
+                            style={compactInputStyle}
+                          />
+                        </label>
+                        <label style={bookDeliveryLabelStyle}>
+                          {editorLanguage === "nl" ? "Toegang" : "Access"}
+                          <select
+                            value={selectedBook.accessModel ?? ""}
+                            onChange={(e) => {
+                              const v = e.target.value as "" | "free" | "paid";
+                              updateSelectedBook((book) => {
+                                if (v === "") {
+                                  const {
+                                    accessModel: _a,
+                                    shopTag: _s,
+                                    productId: _p,
+                                    ...rest
+                                  } = book;
+                                  return rest as Book;
+                                }
+                                if (v !== "paid") {
+                                  const { shopTag: _s, productId: _p, ...rest } = book;
+                                  return { ...rest, accessModel: v } as Book;
+                                }
+                                return { ...book, accessModel: v };
+                              });
+                            }}
+                            style={selectStyle}
+                          >
+                            <option value="">
+                              {editorLanguage === "nl" ? "(niet gezet)" : "(unset)"}
+                            </option>
+                            <option value="free">free</option>
+                            <option value="paid">paid</option>
+                          </select>
+                        </label>
+                        {selectedBook.accessModel === "paid" ? (
+                          <>
+                            <label style={bookDeliveryLabelStyle}>
+                              {editorLanguage === "nl" ? "Shop-tag" : "Shop tag"}
+                              <input
+                                value={selectedBook.shopTag ?? ""}
+                                onChange={(e) => {
+                                  const v = e.target.value;
+                                  updateSelectedBook((book) => {
+                                    if (book.accessModel !== "paid") return book;
+                                    const t = v.trim();
+                                    if (!t) {
+                                      const { shopTag: _omit, ...rest } = book;
+                                      return rest as Book;
+                                    }
+                                    return { ...book, shopTag: t };
+                                  });
+                                }}
+                                placeholder="campaign / bundle …"
+                                style={compactInputStyle}
+                              />
+                            </label>
+                            <label style={bookDeliveryLabelStyle}>
+                              {editorLanguage === "nl" ? "Product-ID" : "Product id"}
+                              <input
+                                value={selectedBook.productId ?? ""}
+                                onChange={(e) => {
+                                  const v = e.target.value;
+                                  updateSelectedBook((book) => {
+                                    if (book.accessModel !== "paid") return book;
+                                    const t = v.trim();
+                                    if (!t) {
+                                      const { productId: _omit, ...rest } = book;
+                                      return rest as Book;
+                                    }
+                                    return { ...book, productId: t };
+                                  });
+                                }}
+                                placeholder="SKU / entitlement id"
+                                style={compactInputStyle}
+                              />
+                            </label>
+                          </>
+                        ) : null}
+                        <label style={{ ...bookDeliveryLabelStyle, gridColumn: "1 / -1" }}>
+                          {editorLanguage === "nl" ? "Unlock-regels" : "Unlock rules"}
+                          <select
+                            value={selectedBook.unlockRules?.type ?? "none"}
+                            onChange={(e) => {
+                              const t = e.target.value as "none" | "requires_exams";
+                              updateSelectedBook((book) => {
+                                if (t === "none") {
+                                  const { unlockRules: _u, ...rest } = book;
+                                  return rest as Book;
+                                }
+                                return {
+                                  ...book,
+                                  unlockRules: {
+                                    type: "requires_exams",
+                                    requiredBookId: book.unlockRules?.requiredBookId,
+                                    requiredExamLessonIds:
+                                      book.unlockRules?.requiredExamLessonIds,
+                                    requiredPassMode:
+                                      book.unlockRules?.requiredPassMode ?? "all",
+                                  },
+                                };
+                              });
+                            }}
+                            style={selectStyle}
+                          >
+                            <option value="none">none</option>
+                            <option value="requires_exams">requires_exams</option>
+                          </select>
+                        </label>
+                        {selectedBook.unlockRules?.type === "requires_exams" ? (
+                          <>
+                            <label style={bookDeliveryLabelStyle}>
+                              {editorLanguage === "nl"
+                                ? "Vereist boek-id"
+                                : "Required book id"}
+                              <select
+                                value={selectedBook.unlockRules.requiredBookId ?? ""}
+                                onChange={(e) => {
+                                  const id = e.target.value;
+                                  updateSelectedBook((book) => {
+                                    const ur = book.unlockRules;
+                                    if (!ur || ur.type !== "requires_exams") return book;
+                                    return {
+                                      ...book,
+                                      unlockRules: {
+                                        ...ur,
+                                        requiredBookId: id || undefined,
+                                      },
+                                    };
+                                  });
+                                }}
+                                style={selectStyle}
+                              >
+                                <option value="">
+                                  {editorLanguage === "nl" ? "Kies boek" : "Pick book"}
+                                </option>
+                                {books
+                                  .filter((b) => b.id !== selectedBook.id)
+                                  .map((b) => (
+                                    <option key={b.id} value={getDocumentId(b)}>
+                                      {readLocalizedText(b.title, editorLanguage)}
+                                    </option>
+                                  ))}
+                              </select>
+                            </label>
+                            <label style={bookDeliveryLabelStyle}>
+                              {editorLanguage === "nl" ? "Slaagmodus" : "Pass mode"}
+                              <select
+                                value={selectedBook.unlockRules.requiredPassMode ?? "all"}
+                                onChange={(e) => {
+                                  const mode = e.target.value as "all" | "any";
+                                  updateSelectedBook((book) => {
+                                    const ur = book.unlockRules;
+                                    if (!ur || ur.type !== "requires_exams") return book;
+                                    return {
+                                      ...book,
+                                      unlockRules: { ...ur, requiredPassMode: mode },
+                                    };
+                                  });
+                                }}
+                                style={selectStyle}
+                              >
+                                <option value="all">all</option>
+                                <option value="any">any</option>
+                              </select>
+                            </label>
+                          </>
+                        ) : null}
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
               </div>
             ) : workspaceTab === "sources" ? (
               <div style={titleGridStyle}>
@@ -3628,6 +3955,25 @@ export default function LessonStudioPage() {
                   title="Export missing texts for external translation"
                 >
                   {editorLanguage === "nl" ? "Exporteer ontbrekende teksten" : "Export missing texts"}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleAutoTranslateMissing}
+                  disabled={autoTranslateBusy || isSyncing}
+                  style={secondaryActionButtonStyle}
+                  title={
+                    editorLanguage === "nl"
+                      ? "Vult ontbrekende EN/NL-teksten op de server (alle boeken)"
+                      : "Fills missing EN/NL texts on the server (all books)"
+                  }
+                >
+                  {autoTranslateBusy
+                    ? editorLanguage === "nl"
+                      ? "Bezig met auto-vertalen…"
+                      : "Auto-translating…"
+                    : editorLanguage === "nl"
+                    ? "Auto-vertaal ontbrekende teksten"
+                    : "Auto-translate missing texts"}
                 </button>
               </div>
             ) : (
@@ -3814,12 +4160,31 @@ export default function LessonStudioPage() {
             {visibleBooks.map((book) => {
               const isActiveBook = book.id === selectedBookId;
               const visibleBookLessons = book.lessons.filter(
-                (lesson) => lesson.variantId === activeVariant
+                (lesson) => (lesson.variantId ?? activeVariant) === activeVariant
               );
+              const isBookExpanded = !!expandedBookIds[book.id];
 
               return (
                 <div key={book.id} style={bookCardStyle}>
                   <div style={bookHeaderRowStyle}>
+                    <button
+                      type="button"
+                      aria-expanded={isBookExpanded}
+                      title={
+                        editorLanguage === "nl"
+                          ? "Lessen tonen of verbergen"
+                          : "Show or hide lessons"
+                      }
+                      onClick={() => {
+                        setExpandedBookIds((prev) => ({
+                          ...prev,
+                          [book.id]: !prev[book.id],
+                        }));
+                      }}
+                      style={bookChevronButtonStyle}
+                    >
+                      {isBookExpanded ? "▼" : "▶"}
+                    </button>
                     <button
                       type="button"
                       onClick={() => {
@@ -3838,14 +4203,19 @@ export default function LessonStudioPage() {
                     <button
                       type="button"
                       onClick={() => handleDeleteBook(book.id)}
-                      style={dangerTinyButtonStyle}
+                      style={sidebarIconDeleteButtonStyle}
+                      title={editorLanguage === "nl" ? "Boek verwijderen" : "Delete book"}
+                      aria-label={
+                        editorLanguage === "nl" ? "Boek verwijderen" : "Delete book"
+                      }
                     >
-                      Delete
+                      <SidebarTrashIcon />
                     </button>
                   </div>
 
                   <div style={lessonListStyle}>
-                    {visibleBookLessons.map((lesson) => {
+                    {isBookExpanded
+                      ? visibleBookLessons.map((lesson) => {
                       const isActiveLesson = lesson.id === selectedLessonId;
 
                       return (
@@ -3871,16 +4241,23 @@ export default function LessonStudioPage() {
                           <button
                             type="button"
                             onClick={() => handleDeleteLesson(lesson.id)}
-                            style={dangerTinyButtonStyle}
+                            style={sidebarIconDeleteButtonStyle}
+                            title={
+                              editorLanguage === "nl" ? "Les verwijderen" : "Delete lesson"
+                            }
+                            aria-label={
+                              editorLanguage === "nl" ? "Les verwijderen" : "Delete lesson"
+                            }
                           >
-                            Delete
+                            <SidebarTrashIcon />
                           </button>
                         </div>
                       );
-                    })}
+                    })
+                      : null}
                   </div>
 
-                  {isActiveBook ? (
+                  {isActiveBook && isBookExpanded ? (
                     <button
                       type="button"
                       onClick={handleCreateLesson}
@@ -4600,6 +4977,17 @@ const titleGridStyle: CSSProperties = {
   minWidth: 0,
 };
 
+const curriculumHeaderCardStyle: CSSProperties = {
+  border: "1px solid #dbe3ec",
+  borderRadius: 14,
+  padding: 12,
+  background: "#fff",
+  display: "grid",
+  gap: 10,
+  minWidth: 0,
+  alignSelf: "start",
+};
+
 const inlineRowStyle: CSSProperties = {
   display: "grid",
   gridTemplateColumns: "1.2fr 1fr",
@@ -4946,6 +5334,59 @@ const bookHeaderRowStyle: CSSProperties = {
   alignItems: "center",
 };
 
+const bookChevronButtonStyle: CSSProperties = {
+  flex: "0 0 auto",
+  width: 36,
+  border: "1px solid #d0d7e2",
+  borderRadius: 10,
+  padding: "10px 0",
+  background: "#fff",
+  fontSize: 12,
+  fontWeight: 800,
+  cursor: "pointer",
+  color: "#374151",
+};
+
+const bookDeliveryBarStyle: CSSProperties = {
+  borderTop: "1px solid #edf2f7",
+  paddingTop: 10,
+  marginTop: 2,
+  display: "grid",
+  gap: 8,
+  minWidth: 0,
+};
+
+const bookDeliveryToggleStyle: CSSProperties = {
+  border: "none",
+  background: "transparent",
+  padding: "4px 2px",
+  cursor: "pointer",
+  textAlign: "left",
+  fontSize: 12,
+  fontWeight: 800,
+  letterSpacing: "0.06em",
+  textTransform: "uppercase",
+  color: "#475569",
+};
+
+const bookDeliveryGridStyle: CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))",
+  gap: 10,
+  minWidth: 0,
+};
+
+const bookDeliveryLabelStyle: CSSProperties = {
+  display: "grid",
+  gap: 6,
+  fontSize: 11,
+  fontWeight: 800,
+  letterSpacing: "0.05em",
+  textTransform: "uppercase",
+  color: "#64748b",
+  minWidth: 0,
+};
+
 const bookButtonStyle: CSSProperties = {
   flex: 1,
   textAlign: "left",
@@ -5004,6 +5445,22 @@ const dangerTinyButtonStyle: CSSProperties = {
   background: "#fff5f5",
   fontSize: 12,
   fontWeight: 700,
+  cursor: "pointer",
+  color: "#b91c1c",
+};
+
+const sidebarIconDeleteButtonStyle: CSSProperties = {
+  flex: "0 0 auto",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  width: 40,
+  minWidth: 40,
+  height: 40,
+  border: "1px solid #fecaca",
+  borderRadius: 10,
+  padding: 0,
+  background: "#fff5f5",
   cursor: "pointer",
   color: "#b91c1c",
 };

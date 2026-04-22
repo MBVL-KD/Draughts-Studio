@@ -94,35 +94,72 @@ playbackRouter.get("/:stepId/playback", async (req: Req, res: Res) => {
     const requiredLanguages = resolveRequiredLanguages(req);
     const stepId = req.params.stepId;
 
-    const resolved = await findStepRefWithCurriculumFallback(owner, stepId);
-    if (!resolved) {
-      throw new NotFoundError("Step not found");
-    }
-    const { stepRef, contentOwner } = resolved;
-
     const guardBookId =
       typeof req.query.bookId === "string" ? req.query.bookId.trim() : "";
     const guardLessonId =
       typeof req.query.lessonId === "string" ? req.query.lessonId.trim() : "";
-    if (guardBookId && guardBookId !== stepRef.bookId) {
-      throw new ValidationError("Step context mismatch", [
-        {
-          path: "bookId",
-          code: "playback.context.book_mismatch",
-          message: "bookId does not match resolved step context",
-          severity: "error",
-        },
-      ]);
-    }
-    if (guardLessonId && guardLessonId !== stepRef.lessonId) {
-      throw new ValidationError("Step context mismatch", [
-        {
-          path: "lessonId",
-          code: "playback.context.lesson_mismatch",
-          message: "lessonId does not match resolved step context",
-          severity: "error",
-        },
-      ]);
+    let stepRef: {
+      book: unknown;
+      lesson: Record<string, unknown>;
+      step: Record<string, unknown>;
+      bookId: string;
+      lessonId: string;
+      stepId: string;
+    };
+    let contentOwner = owner;
+
+    if (guardBookId && guardLessonId) {
+      const resolvedLesson = await getLessonRefWithCurriculumFallback(
+        owner,
+        guardBookId,
+        guardLessonId
+      );
+      if (!resolvedLesson?.lessonRef?.lesson) {
+        throw new NotFoundError("Lesson not found");
+      }
+      const lessonAny = resolvedLesson.lessonRef.lesson as Record<string, unknown>;
+      const steps = Array.isArray(lessonAny.steps)
+        ? (lessonAny.steps as Array<{ id?: string; stepId?: string }>)
+        : [];
+      const step = steps.find((s) => getStepAppId(s) === stepId);
+      if (!step) throw new NotFoundError("Step not found");
+      contentOwner = resolvedLesson.contentOwner;
+      stepRef = {
+        book: resolvedLesson.lessonRef.book,
+        lesson: lessonAny,
+        step: step as unknown as Record<string, unknown>,
+        bookId: guardBookId,
+        lessonId: guardLessonId,
+        stepId,
+      };
+    } else {
+      const resolved = await findStepRefWithCurriculumFallback(owner, stepId);
+      if (!resolved) {
+        throw new NotFoundError("Step not found");
+      }
+      stepRef = resolved.stepRef as typeof stepRef;
+      contentOwner = resolved.contentOwner;
+
+      if (guardBookId && guardBookId !== stepRef.bookId) {
+        throw new ValidationError("Step context mismatch", [
+          {
+            path: "bookId",
+            code: "playback.context.book_mismatch",
+            message: "bookId does not match resolved step context",
+            severity: "error",
+          },
+        ]);
+      }
+      if (guardLessonId && guardLessonId !== stepRef.lessonId) {
+        throw new ValidationError("Step context mismatch", [
+          {
+            path: "lessonId",
+            code: "playback.context.lesson_mismatch",
+            message: "lessonId does not match resolved step context",
+            severity: "error",
+          },
+        ]);
+      }
     }
 
     const sourceId =

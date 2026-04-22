@@ -328,8 +328,11 @@ export async function resetStaleProcessingItems(
     },
     {
       $set: {
-        status: "pending",
-        errorMessage: null,
+        status: "skipped",
+        errorMessage:
+          "Skipped automatically: stale processing item recovered after runner timeout/crash.",
+        importedStepId: null,
+        importedLessonId: null,
         updatedAt: new Date(),
       },
       $inc: {

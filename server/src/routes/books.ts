@@ -1,4 +1,8 @@
 import express from "express";
+import { execFile, spawn } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
+import { promisify } from "node:util";
 import {
   createBook,
   getBookById,
@@ -16,6 +20,53 @@ import { getOwnerContext } from "./ownerContext";
 
 type Req = express.Request;
 type Res = express.Response;
+const execFileAsync = promisify(execFile);
+
+function startDetachedSplitLargePuzzelsJob(ownerType: string, ownerId: string) {
+  const scriptPath = path.resolve(__dirname, "../scripts/splitLargePuzzelsBooks.ts");
+  const reportsDir = path.resolve(__dirname, "../../..", "reports");
+  fs.mkdirSync(reportsDir, { recursive: true });
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const logPath = path.join(
+    reportsDir,
+    `split-large-puzzels-${ownerType}-${ownerId}-${stamp}.log`
+  );
+  const fd = fs.openSync(logPath, "a");
+  const env = {
+    ...process.env,
+    TS_NODE_TRANSPILE_ONLY: "true",
+    TS_NODE_COMPILER_OPTIONS: JSON.stringify({
+      module: "CommonJS",
+      moduleResolution: "Node",
+      target: "ES2020",
+      esModuleInterop: true,
+      ignoreDeprecations: "6.0",
+    }),
+  };
+  const child = spawn(
+    process.execPath,
+    [
+      "-r",
+      "ts-node/register",
+      scriptPath,
+      "--write",
+      `--ownerType=${ownerType}`,
+      `--ownerId=${ownerId}`,
+    ],
+    {
+      cwd: path.resolve(__dirname, "../.."),
+      env,
+      detached: true,
+      stdio: ["ignore", fd, fd],
+    }
+  );
+  child.unref();
+  fs.closeSync(fd);
+  return {
+    pid: child.pid,
+    logPath,
+  };
+}
 
 type UnlockRules = {
   type: "none" | "requires_exams";
@@ -65,7 +116,8 @@ function normalizeUnlockRules(raw: unknown): UnlockRules {
 
 function normalizeBookForClient(
   item: Record<string, unknown>,
-  gates?: { isEntitled?: boolean; examGatePassed?: boolean }
+  gates?: { isEntitled?: boolean; examGatePassed?: boolean },
+  options?: { compactImport?: boolean }
 ): Record<string, unknown> {
   const accessModel = item.accessModel === "paid" ? "paid" : "free";
   const productId = typeof item.productId === "string" ? item.productId : "";
@@ -95,6 +147,11 @@ function normalizeBookForClient(
     unlockRules,
     sequenceIndex,
     lessons: normalizedLessons,
+    ...(options?.compactImport === true &&
+    Array.isArray(item.tags) &&
+    item.tags.includes("puzzels-import")
+      ? { isCompactImport: true }
+      : {}),
     eligibility: {
       eligible: entitlementOk && examGateOk,
       entitlementOk,
@@ -141,10 +198,14 @@ booksRouter.get("/", async (req: Req, res: Res) => {
     const owner = getOwnerContext(req);
     const limit = toFiniteNumber(req.query.limit);
     const offset = toFiniteNumber(req.query.offset);
+    const includeImport = toBoolean(req.query.includeImport) === true;
+    const compactImport = toBoolean(req.query.compactImport) === true;
     const items = await listBooks(owner, {
       search: typeof req.query.search === "string" ? req.query.search : undefined,
       status: typeof req.query.status === "string" ? req.query.status : undefined,
       tag: typeof req.query.tag === "string" ? req.query.tag : undefined,
+      includeImport,
+      compactImport,
       limit,
       offset,
       sort: parseSort(req.query.sort),
@@ -152,7 +213,11 @@ booksRouter.get("/", async (req: Req, res: Res) => {
     const isEntitled = toBoolean(req.query.isEntitled);
     const examGatePassed = toBoolean(req.query.examGatePassed);
     const normalizedItems = items.map((it) =>
-      normalizeBookForClient(it as unknown as Record<string, unknown>, { isEntitled, examGatePassed })
+      normalizeBookForClient(
+        it as unknown as Record<string, unknown>,
+        { isEntitled, examGatePassed },
+        { compactImport }
+      )
     );
     res.json({
       items: normalizedItems,
@@ -246,6 +311,46 @@ booksRouter.delete("/:bookId", async (req: Req, res: Res) => {
     const owner = getOwnerContext(req);
     const item = await softDeleteBook(owner, req.params.bookId);
     sendItem(res, item as unknown as Record<string, unknown>);
+  } catch (error) {
+    handleRouteError(res, error);
+  }
+});
+
+booksRouter.post("/i18n/auto-translate", async (req: Req, res: Res) => {
+  try {
+    const dryRun = req.body?.dryRun === true;
+    const scriptPath = path.resolve(__dirname, "../scripts/autoTranslateMissingLocalizedTexts.js");
+    const args = [scriptPath, ...(dryRun ? ["--dry-run"] : [])];
+    const { stdout, stderr } = await execFileAsync(process.execPath, args, {
+      cwd: path.resolve(__dirname, "../.."),
+      env: process.env,
+      maxBuffer: 10 * 1024 * 1024,
+    });
+    const output = `${stdout ?? ""}\n${stderr ?? ""}`.trim();
+    const match = output.match(/(\{[\s\S]*\})\s*$/);
+    if (!match) {
+      throw new Error("No JSON result returned by translation script.");
+    }
+    const parsed = JSON.parse(match[1]);
+    res.json({ item: parsed });
+  } catch (error) {
+    handleRouteError(res, error);
+  }
+});
+
+booksRouter.post("/admin/split-large-puzzels", async (req: Req, res: Res) => {
+  try {
+    const owner = getOwnerContext(req);
+    const job = startDetachedSplitLargePuzzelsJob(owner.ownerType, owner.ownerId);
+    res.json({
+      item: {
+        started: true,
+        pid: job.pid,
+        ownerType: owner.ownerType,
+        ownerId: owner.ownerId,
+        logPath: job.logPath,
+      },
+    });
   } catch (error) {
     handleRouteError(res, error);
   }

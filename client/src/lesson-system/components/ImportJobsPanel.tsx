@@ -30,10 +30,39 @@ type RunResult = {
   };
 };
 
+type ImportRunResponse = {
+  item: RunResult;
+  batchSteps?: Array<{
+    action: string;
+    message?: string;
+    itemId?: string;
+    importedStepId?: string;
+    counters?: RunResult["counters"];
+  }>;
+};
+
+function isConnectionRefusedLike(error: unknown): boolean {
+  const msg =
+    error instanceof Error
+      ? error.message
+      : typeof error === "string"
+        ? error
+        : "";
+  const lower = msg.toLowerCase();
+  return (
+    lower.includes("econnrefused") ||
+    lower.includes("failed to fetch") ||
+    lower.includes("networkerror") ||
+    lower.includes("network request failed")
+  );
+}
+
 export default function ImportJobsPanel({ language }: Props) {
   const t = (en: string, nl: string) => (language === "nl" ? nl : en);
   const runLockRef = useRef(false);
   const pollInFlightRef = useRef(false);
+  const autoRunActiveRef = useRef(false);
+  const autoRunStopRef = useRef(false);
   const [jobs, setJobs] = useState<ImportJob[]>([]);
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
   const [selectedJob, setSelectedJob] = useState<ImportJob | null>(null);
@@ -54,6 +83,13 @@ export default function ImportJobsPanel({ language }: Props) {
   >("");
   const [basePuzzleRating, setBasePuzzleRating] = useState("");
   const [batchSize, setBatchSize] = useState("10");
+  const [runLog, setRunLog] = useState<string[]>([]);
+  const [autoRunActive, setAutoRunActive] = useState(false);
+  const getConnectionRefusedMessage = () =>
+    t(
+      "Connection to backend failed (ECONNREFUSED). Check if the server is running and then retry.",
+      "Verbinding met backend mislukt (ECONNREFUSED). Controleer of de server draait en probeer opnieuw."
+    );
 
   const selectedJobItems = useMemo(() => {
     if (itemFilter === "all") return items;
@@ -128,7 +164,15 @@ export default function ImportJobsPanel({ language }: Props) {
       if (pollInFlightRef.current) return;
       pollInFlightRef.current = true;
       void refreshSelectedJob()
-        .catch(() => undefined)
+        .catch((e: unknown) => {
+          if (!isConnectionRefusedLike(e)) return;
+          const msg = getConnectionRefusedMessage();
+          setError(msg);
+          appendRunLogLines([`Polling stopped: ${msg}`]);
+          if (autoRunActiveRef.current) {
+            autoRunStopRef.current = true;
+          }
+        })
         .finally(() => {
           pollInFlightRef.current = false;
         });
@@ -236,7 +280,16 @@ export default function ImportJobsPanel({ language }: Props) {
     }
   };
 
+  const appendRunLogLines = (lines: string[]) => {
+    const stamped = lines.map((line) => `${new Date().toISOString().slice(11, 23)} ${line}`);
+    setRunLog((prev) => [...prev.slice(-220), ...stamped]);
+  };
+
   const runImportJob = async (jobId: string, maxItems: number) => {
+    if (autoRunActiveRef.current) {
+      setError(t("Stop the automatic run first.", "Stop eerst de automatische run."));
+      return;
+    }
     if (runLockRef.current) {
       setError(t("A run request is already in progress.", "Er loopt al een run-verzoek."));
       return;
@@ -246,14 +299,25 @@ export default function ImportJobsPanel({ language }: Props) {
     setError("");
     setMessage(t("Running import batch...", "Import batch wordt uitgevoerd..."));
     try {
-      const response = await apiPost<ItemResponse<RunResult>>(
-        `/api/import-jobs/${jobId}/run`,
-        { maxItems }
-      );
-      const result = response.item;
+      const raw = await apiPost<ImportRunResponse>(`/api/import-jobs/${jobId}/run`, { maxItems });
+      const result = raw.item;
+      if (raw.batchSteps && raw.batchSteps.length > 0) {
+        appendRunLogLines(
+          raw.batchSteps.map((s, i) => {
+            const c = s.counters;
+            const prog = c ? `${c.processedItems}/${c.totalItems}` : "";
+            return `[${i + 1}/${raw.batchSteps!.length}] ${s.action} ${prog} ${s.message ?? ""}`.trim();
+          })
+        );
+      }
       setMessage(
-        result?.message ??
-          t(`Run completed (${result?.action ?? "unknown"}).`, `Run voltooid (${result?.action ?? "onbekend"}).`)
+        raw.batchSteps && raw.batchSteps.length > 1
+          ? t(
+              `Run finished (${raw.batchSteps.length} puzzles in one HTTP request — can take a long time with Scan on).`,
+              `Run klaar (${raw.batchSteps.length} puzzels in één HTTP-verzoek — met Scan aan kan dat lang duren).`
+            )
+          : result?.message ??
+              t(`Run completed (${result?.action ?? "unknown"}).`, `Run voltooid (${result?.action ?? "onbekend"}).`)
       );
       if (result?.counters) {
         setSelectedJob((prev) =>
@@ -272,16 +336,110 @@ export default function ImportJobsPanel({ language }: Props) {
       }
       await refreshSelectedJob();
     } catch (e: any) {
-      setError(e?.message ?? t("Failed to run import job.", "Run van importjob mislukt."));
+      setError(
+        isConnectionRefusedLike(e)
+          ? getConnectionRefusedMessage()
+          : e?.message ?? t("Failed to run import job.", "Run van importjob mislukt.")
+      );
     } finally {
       runLockRef.current = false;
       setIsBusy(false);
     }
   };
 
+  const stopAutoRun = () => {
+    autoRunStopRef.current = true;
+    setMessage(t("Stopping after this batch…", "Stoppen na deze batch…"));
+  };
+
+  const runImportJobAutoUntilDone = async () => {
+    const jobId = selectedJobId;
+    if (!jobId) {
+      setError(t("Select a job first.", "Selecteer eerst een job."));
+      return;
+    }
+    if (autoRunActiveRef.current) return;
+    if (runLockRef.current) {
+      setError(t("A manual run is in progress.", "Er loopt een handmatige run."));
+      return;
+    }
+    autoRunStopRef.current = false;
+    autoRunActiveRef.current = true;
+    setAutoRunActive(true);
+    setError("");
+    setMessage(t("Auto-run started…", "Auto-run gestart…"));
+    appendRunLogLines([`--- auto-run start job=${jobId} maxItems per batch=${runBatchCount} ---`]);
+    let batchRound = 0;
+    try {
+      while (!autoRunStopRef.current) {
+        batchRound += 1;
+        appendRunLogLines([`HTTP batch round #${batchRound} (POST /run)`]);
+        const raw = await apiPost<ImportRunResponse>(`/api/import-jobs/${jobId}/run`, {
+          maxItems: runBatchCount,
+        });
+        if (raw.batchSteps?.length) {
+          appendRunLogLines(
+            raw.batchSteps.map((s, i) => {
+              const c = s.counters;
+              const prog = c ? `${c.processedItems}/${c.totalItems}` : "";
+              return `  [${i + 1}/${raw.batchSteps.length}] ${s.action} ${prog} ${s.message ?? ""}`.trim();
+            })
+          );
+        } else {
+          appendRunLogLines([
+            `  (no batchSteps in response) ${raw.item?.action ?? "?"} ${raw.item?.message ?? ""}`,
+          ]);
+        }
+        await refreshSelectedJob();
+        const last = raw.item;
+        if (last.action === "completed" || last.counters?.status === "completed") {
+          appendRunLogLines(["Auto-run stopped: job completed."]);
+          setMessage(t("Auto-run finished: job completed.", "Auto-run klaar: job voltooid."));
+          break;
+        }
+        if (last.action === "paused" || last.counters?.status === "paused") {
+          appendRunLogLines(["Auto-run stopped: job paused."]);
+          setMessage(t("Auto-run stopped: job paused.", "Auto-run gestopt: job gepauzeerd."));
+          break;
+        }
+        if (last.counters?.status === "failed" || last.action === "failed") {
+          appendRunLogLines(["Auto-run stopped: job failed."]);
+          setMessage(t("Auto-run stopped: job failed.", "Auto-run gestopt: job mislukt."));
+          break;
+        }
+        if (last.action === "idle") {
+          appendRunLogLines(["Auto-run stopped: job is idle (resume or run once?)."]);
+          setMessage(
+            t("Auto-run stopped: job is idle.", "Auto-run gestopt: job staat op idle.")
+          );
+          break;
+        }
+        if (autoRunStopRef.current) {
+          appendRunLogLines(["Auto-run stopped: user requested stop."]);
+          setMessage(t("Auto-run stopped by user.", "Auto-run door gebruiker gestopt."));
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 500));
+      }
+    } catch (e: unknown) {
+      const msg = isConnectionRefusedLike(e)
+        ? getConnectionRefusedMessage()
+        : e instanceof Error
+          ? e.message
+          : String(e);
+      appendRunLogLines([`Auto-run error: ${msg}`]);
+      setError(msg);
+    } finally {
+      autoRunActiveRef.current = false;
+      setAutoRunActive(false);
+      autoRunStopRef.current = false;
+    }
+  };
+
   const pauseJob = async (job: ImportJob) => {
     const jobId = job.jobId ?? job.id;
     if (!jobId) return;
+    autoRunStopRef.current = true;
     setIsBusy(true);
     setError("");
     setMessage("");
@@ -376,6 +534,22 @@ export default function ImportJobsPanel({ language }: Props) {
   };
 
   const runBatchCount = Math.max(1, Math.min(100, Math.floor(Number(batchSize) || 10)));
+
+  const runLogBoxStyle: CSSProperties = {
+    marginTop: 8,
+    maxHeight: 200,
+    overflowY: "auto",
+    fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, monospace",
+    fontSize: 11,
+    lineHeight: 1.35,
+    color: "#0f172a",
+    background: "#f8fafc",
+    border: "1px solid #e2e8f0",
+    borderRadius: 8,
+    padding: "8px 10px",
+    whiteSpace: "pre-wrap",
+    wordBreak: "break-word",
+  };
 
   return (
     <div style={rootStyle}>
@@ -516,6 +690,52 @@ export default function ImportJobsPanel({ language }: Props) {
                 {t("Refresh", "Vernieuwen")}
               </button>
             </div>
+            <div style={mutedTextStyle}>
+              {language === "nl" ? (
+                <>
+                  <strong>Run batch</strong> = één HTTP-verzoek; de server verwerkt tot N puzzels <strong>achter
+                  elkaar</strong> (scrapen + eventueel zware engine-Scan). Tot die tijd lijkt de UI stil —
+                  dat is normaal. Tip: kleinere N of Scan uit voor snellere batches.{" "}
+                  <strong>Auto-run tot klaar</strong> herhaalt batches tot de job klaar is (tussen batches korte
+                  pauze). Server: regels met <code>[import-run]</code>.
+                </>
+              ) : (
+                <>
+                  <strong>Run batch</strong> = one HTTP request; the server imports up to N puzzles{" "}
+                  <strong>in sequence</strong> (scrape + optional heavy Scan). The UI stays idle until it finishes —
+                  that is expected. Try a smaller N or disable Scan for faster batches.{" "}
+                  <strong>Auto-run until done</strong> repeats batches until the job completes (short pause between
+                  rounds). Server logs lines tagged <code>[import-run]</code>.
+                </>
+              )}
+            </div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+              <button
+                type="button"
+                onClick={() => void runImportJobAutoUntilDone()}
+                style={primaryButtonStyle}
+                disabled={!selectedJobId || autoRunActive || isBusy}
+              >
+                {t("Auto-run until done", "Auto-run tot klaar")}
+              </button>
+              <button
+                type="button"
+                onClick={stopAutoRun}
+                style={secondaryButtonStyle}
+                disabled={!autoRunActive}
+              >
+                {t("Stop auto-run", "Stop auto-run")}
+              </button>
+              <button
+                type="button"
+                onClick={() => setRunLog([])}
+                style={secondaryButtonStyle}
+                disabled={runLog.length === 0}
+              >
+                {t("Clear run log", "Log wissen")}
+              </button>
+            </div>
+            {runLog.length > 0 ? <div style={runLogBoxStyle}>{runLog.join("\n")}</div> : null}
           </div>
           {selectedJob ? (
             <div style={detailsGridStyle}>

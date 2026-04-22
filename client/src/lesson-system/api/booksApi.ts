@@ -5,6 +5,19 @@ type ItemResponse<T> = {
   item: T;
 };
 
+export type AutoTranslateResult = {
+  ok: boolean;
+  booksScanned: number;
+  updatedBooks: number;
+  scannedFields: number;
+  filledEnCount: number;
+  filledNlCount: number;
+  apiTranslatedCount: number;
+  fallbackTranslatedCount: number;
+  dryRun: boolean;
+  reportPath: string;
+};
+
 type ListResponse<T> = {
   items: T[];
   pagination: {
@@ -19,6 +32,8 @@ export function listBooks(
     search?: string;
     status?: string;
     tag?: string;
+    includeImport?: boolean;
+    compactImport?: boolean;
     limit?: number;
     offset?: number;
     sort?: "updatedAt_desc" | "updatedAt_asc";
@@ -29,6 +44,8 @@ export function listBooks(
   if (params?.search) qs.set("search", params.search);
   if (params?.status) qs.set("status", params.status);
   if (params?.tag) qs.set("tag", params.tag);
+  if (params?.includeImport === true) qs.set("includeImport", "true");
+  if (params?.compactImport === true) qs.set("compactImport", "true");
   if (typeof params?.limit === "number") qs.set("limit", String(params.limit));
   if (typeof params?.offset === "number") qs.set("offset", String(params.offset));
   if (params?.sort) qs.set("sort", params.sort);
@@ -62,5 +79,9 @@ export function patchBook(
 
 export function deleteBook(bookId: string, init?: RequestInit) {
   return apiDelete<ItemResponse<Book>>(`/api/books/${encodeURIComponent(bookId)}`, init);
+}
+
+export function autoTranslateMissingI18n(dryRun = false, init?: RequestInit) {
+  return apiPost<ItemResponse<AutoTranslateResult>>("/api/books/i18n/auto-translate", { dryRun }, init);
 }
 
