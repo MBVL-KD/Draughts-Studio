@@ -12,6 +12,8 @@
     "repair:imported-puzzles": "ts-node src/scripts/repairImportedPuzzleMismatches.ts",
     "remove:empty-imported-puzzles": "ts-node src/scripts/removeEmptyImportedPuzzles.ts",
     "split:large-puzzels-books": "ts-node src/scripts/splitLargePuzzelsBooks.ts",
+    "reindex:playback-steps": "node src/scripts/reindexPlaybackSteps.js",
+    "sync:test-to-kid": "node src/scripts/syncTestToKid.js",
     "audit:empty-puzzle-steps": "node src/scripts/auditEmptyPuzzleSteps.js",
     "backfill:book-access-defaults": "node src/scripts/backfillBookAccessDefaults.js",
     "translate:missing-i18n": "node src/scripts/autoTranslateMissingLocalizedTexts.js",

@@ -11,6 +11,10 @@ import {
   softDeleteBook,
 } from "../repositories/bookRepository";
 import {
+  removePlaybackStepsByBook,
+  replacePlaybackStepsForBook,
+} from "../repositories/playbackStepRepository";
+import {
   ConflictError,
   ForbiddenError,
   NotFoundError,
@@ -260,6 +264,10 @@ booksRouter.post("/", async (req: Req, res: Res) => {
 
     const owner = getOwnerContext(req);
     const item = await createBook(owner, req.body.document);
+    await replacePlaybackStepsForBook(
+      owner,
+      item as Record<string, unknown> & { bookId?: string; id?: string; revision?: number }
+    );
     sendItem(res, item as unknown as Record<string, unknown>);
   } catch (error) {
     handleRouteError(res, error);
@@ -300,6 +308,10 @@ booksRouter.patch("/:bookId", async (req: Req, res: Res) => {
       document,
       Number(expectedRevision)
     );
+    await replacePlaybackStepsForBook(
+      owner,
+      item as Record<string, unknown> & { bookId?: string; id?: string; revision?: number }
+    );
     sendItem(res, item as unknown as Record<string, unknown>);
   } catch (error) {
     handleRouteError(res, error);
@@ -310,6 +322,7 @@ booksRouter.delete("/:bookId", async (req: Req, res: Res) => {
   try {
     const owner = getOwnerContext(req);
     const item = await softDeleteBook(owner, req.params.bookId);
+    await removePlaybackStepsByBook(owner, req.params.bookId);
     sendItem(res, item as unknown as Record<string, unknown>);
   } catch (error) {
     handleRouteError(res, error);

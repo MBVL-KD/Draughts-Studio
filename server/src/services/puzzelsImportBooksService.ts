@@ -13,6 +13,7 @@ import {
   migrateLessonLegacyStepsToAuthoringBundle,
   syncLegacyStepsFromAuthoringBundle,
 } from "../import/normalize/legacyImportStepToAuthoringV2";
+import { replacePlaybackStepsForLesson } from "../repositories/playbackStepRepository";
 
 type OwnerContext = {
   ownerType: "user" | "school" | "org";
@@ -394,6 +395,13 @@ export async function appendImportedPuzzleStep(
         String((s as Record<string, unknown>).id) === authStepId ||
         String((s as Record<string, unknown>).stepId) === authStepId
     ) ?? (syncedSteps[syncedSteps.length - 1] as Record<string, unknown>);
+
+  await replacePlaybackStepsForLesson(
+    owner,
+    bookId,
+    Number((updatedBook as any).revision ?? Number((book as any).revision ?? 1)),
+    updatedLesson as Record<string, unknown>
+  );
 
   return {
     updatedBook: updatedBook as Record<string, unknown>,
