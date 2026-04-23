@@ -1,5 +1,4 @@
 require("dotenv/config");
-const { execFileSync } = require("node:child_process");
 const mongoose = require("mongoose");
 
 function parseFlags() {
@@ -9,7 +8,6 @@ function parseFlags() {
   const sourceDbArg = args.find((arg) => arg.startsWith("--sourceDb="));
   const targetDbArg = args.find((arg) => arg.startsWith("--targetDb="));
   const write = args.includes("--write");
-  /** If true: only puzzels-import (legacy). If false: all non-deleted books for owner (curriculum + puzzels). */
   const puzzlesOnly = args.includes("--puzzles-only");
   return {
     ownerType: ownerTypeArg ? ownerTypeArg.slice("--ownerType=".length).trim() : "user",
@@ -31,39 +29,9 @@ function dbUriFromBase(baseUri, dbName) {
   return `${base.slice(0, slash)}/${dbName}${qs}`;
 }
 
-function summarizeBooks(books) {
-  return books.map((book) => {
-    const lessons = Array.isArray(book.lessons) ? book.lessons : [];
-    let steps = 0;
-    for (const lesson of lessons) {
-      if (Array.isArray(lesson?.authoringV2?.authoringLesson?.stepIds)) {
-        steps += lesson.authoringV2.authoringLesson.stepIds.length;
-      } else if (Array.isArray(lesson?.steps)) {
-        steps += lesson.steps.length;
-      }
-    }
-    const tags = Array.isArray(book.tags) ? book.tags : [];
-    const isPuzzelsImport = tags.includes("puzzels-import");
-    return {
-      bookId: book.bookId || book.id || "",
-      sequenceIndex: Number.isFinite(Number(book.sequenceIndex)) ? Number(book.sequenceIndex) : null,
-      lessons: lessons.length,
-      steps,
-      bytes: Buffer.byteLength(JSON.stringify(book)),
-      isPuzzelsImport,
-    };
-  });
-}
-
-function runTargetCommand(targetUri, command, extraArgs) {
-  execFileSync("npm", ["run", command, "--", ...extraArgs], {
-    cwd: process.cwd(),
-    stdio: "inherit",
-    env: {
-      ...process.env,
-      MONGO_URI: targetUri,
-    },
-  });
+function stripId(doc) {
+  const { _id, ...rest } = doc;
+  return rest;
 }
 
 async function run() {
@@ -73,84 +41,104 @@ async function run() {
   const sourceUri = dbUriFromBase(baseUri, sourceDb);
   const targetUri = dbUriFromBase(baseUri, targetDb);
   const ownerFilter = { ownerType, ownerId };
-  const activeBookFilter = {
-    ...ownerFilter,
-    $or: [{ isDeleted: false }, { isDeleted: { $exists: false } }],
-  };
+  const activeFilter = { ...ownerFilter, $or: [{ isDeleted: false }, { isDeleted: { $exists: false } }] };
 
   const sourceConn = await mongoose.createConnection(sourceUri).asPromise();
   const targetConn = await mongoose.createConnection(targetUri).asPromise();
+
   try {
-    const sourceBooksCol = sourceConn.db.collection("books");
-    const targetBooksCol = targetConn.db.collection("books");
-    const targetPlaybackCol = targetConn.db.collection("playback_steps");
+    const srcBooks = sourceConn.db.collection("books");
+    const srcLessons = sourceConn.db.collection("lessons");
+    const srcSteps = sourceConn.db.collection("steps");
+    const tgtBooks = targetConn.db.collection("books");
+    const tgtLessons = targetConn.db.collection("lessons");
+    const tgtSteps = targetConn.db.collection("steps");
 
-    const sourceQuery = puzzlesOnly
+    const bookQuery = puzzlesOnly
       ? { ...ownerFilter, isDeleted: false, tags: "puzzels-import" }
-      : activeBookFilter;
+      : activeFilter;
 
-    const sourceBooks = await sourceBooksCol.find(sourceQuery).toArray();
-    const sourceSummary = summarizeBooks(sourceBooks);
-    const sourceSteps = sourceSummary.reduce((sum, row) => sum + row.steps, 0);
-    const puzzleRows = sourceSummary.filter((r) => r.isPuzzelsImport);
-    const curriculumRows = sourceSummary.filter((r) => !r.isPuzzelsImport);
+    // ── Gather source data ───────────────────────────────────────────────────
+    const sourceBooks = await srcBooks.find(bookQuery).toArray();
+
+    const sourceBookIds = sourceBooks.map((b) => b.bookId || b.id).filter(Boolean);
+    const lessonQuery = puzzlesOnly
+      ? { ...ownerFilter, bookId: { $in: sourceBookIds }, isDeleted: { $ne: true } }
+      : { ...ownerFilter, isDeleted: { $ne: true } };
+    const stepQuery = puzzlesOnly
+      ? { ...ownerFilter, bookId: { $in: sourceBookIds }, isDeleted: { $ne: true } }
+      : { ...ownerFilter, isDeleted: { $ne: true } };
+
+    const sourceLessonDocs = await srcLessons.find(lessonQuery).toArray();
+    const sourceStepDocs = await srcSteps.find(stepQuery).toArray();
+
+    // ── Summary ──────────────────────────────────────────────────────────────
+    const lessonCountByBookId = new Map();
+    const stepCountByBookId = new Map();
+    for (const l of sourceLessonDocs) {
+      const bid = l.bookId || "";
+      lessonCountByBookId.set(bid, (lessonCountByBookId.get(bid) ?? 0) + 1);
+    }
+    for (const s of sourceStepDocs) {
+      const bid = s.bookId || "";
+      stepCountByBookId.set(bid, (stepCountByBookId.get(bid) ?? 0) + 1);
+    }
 
     console.log(
       `[sync-test-to-kid] source=${sourceDb} target=${targetDb} owner=${ownerType}:${ownerId} write=${write} mode=${puzzlesOnly ? "puzzles-only" : "all-owner-books"}`
     );
     console.log(
-      `[sync-test-to-kid] sourceBooks=${sourceSummary.length} (curriculum=${curriculumRows.length} puzzels-import=${puzzleRows.length}) sourceSteps=${sourceSteps}`
+      `[sync-test-to-kid] sourceBooks=${sourceBooks.length} sourceLessons=${sourceLessonDocs.length} sourceSteps=${sourceStepDocs.length}`
     );
-    sourceSummary.forEach((row) => {
-      const kind = row.isPuzzelsImport ? "puzzels" : "curriculum";
+    for (const book of sourceBooks) {
+      const bookId = book.bookId || book.id || "";
+      const tags = Array.isArray(book.tags) ? book.tags : [];
+      const kind = tags.includes("puzzels-import") ? "puzzels" : "curriculum";
+      const seq = Number.isFinite(Number(book.sequenceIndex)) ? Number(book.sequenceIndex) : null;
       console.log(
-        `[sync-test-to-kid] source [${kind}] book=${row.bookId} seq=${row.sequenceIndex} lessons=${row.lessons} steps=${row.steps} bytes=${row.bytes}`
+        `[sync-test-to-kid] source [${kind}] book=${bookId} seq=${seq} lessons=${lessonCountByBookId.get(bookId) ?? 0} steps=${stepCountByBookId.get(bookId) ?? 0}`
       );
-    });
+    }
 
     if (!write) {
       console.log(
-        "[sync-test-to-kid] dry-run only (use --write to apply). Full sync replaces ALL books for this owner on target unless --puzzles-only."
+        "[sync-test-to-kid] dry-run only (use --write to apply). Full sync replaces ALL data for this owner on target unless --puzzles-only."
       );
       return;
     }
 
+    // ── Delete target data ───────────────────────────────────────────────────
     if (puzzlesOnly) {
-      await targetBooksCol.deleteMany({ ...ownerFilter, tags: "puzzels-import" });
+      const tgtPuzzleBooks = await tgtBooks.find({ ...ownerFilter, tags: "puzzels-import" }, { projection: { bookId: 1, id: 1 } }).toArray();
+      const tgtPuzzleBookIds = tgtPuzzleBooks.map((b) => b.bookId || b.id).filter(Boolean);
+      await tgtBooks.deleteMany({ ...ownerFilter, tags: "puzzels-import" });
+      if (tgtPuzzleBookIds.length > 0) {
+        await tgtLessons.deleteMany({ ...ownerFilter, bookId: { $in: tgtPuzzleBookIds } });
+        await tgtSteps.deleteMany({ ...ownerFilter, bookId: { $in: tgtPuzzleBookIds } });
+      }
     } else {
-      await targetBooksCol.deleteMany(ownerFilter);
+      await tgtBooks.deleteMany(ownerFilter);
+      await tgtLessons.deleteMany(ownerFilter);
+      await tgtSteps.deleteMany(ownerFilter);
     }
-    await targetPlaybackCol.deleteMany(ownerFilter);
 
+    // ── Insert source data ───────────────────────────────────────────────────
     if (sourceBooks.length > 0) {
-      const cloned = sourceBooks.map((book) => {
-        const { _id, ...rest } = book;
-        return rest;
-      });
-      await targetBooksCol.insertMany(cloned, { ordered: false });
+      await tgtBooks.insertMany(sourceBooks.map(stripId), { ordered: false });
     }
-    console.log(
-      `[sync-test-to-kid] copiedBooks=${sourceBooks.length} from ${sourceDb} to ${targetDb}`
-    );
+    if (sourceLessonDocs.length > 0) {
+      await tgtLessons.insertMany(sourceLessonDocs.map(stripId), { ordered: false });
+    }
+    if (sourceStepDocs.length > 0) {
+      await tgtSteps.insertMany(sourceStepDocs.map(stripId), { ordered: false });
+    }
 
-    runTargetCommand(targetUri, "split:large-puzzels-books", [
-      "--write",
-      `--ownerType=${ownerType}`,
-      `--ownerId=${ownerId}`,
-    ]);
-    runTargetCommand(targetUri, "reindex:playback-steps", [
-      `--ownerType=${ownerType}`,
-      `--ownerId=${ownerId}`,
-    ]);
-
-    const targetBooks = await targetBooksCol.find(activeBookFilter).toArray();
-    const targetSummary = summarizeBooks(targetBooks);
-    const targetSteps = targetSummary.reduce((sum, row) => sum + row.steps, 0);
-    const targetPuzzle = targetSummary.filter((r) => r.isPuzzelsImport);
-    const targetCurriculum = targetSummary.filter((r) => !r.isPuzzelsImport);
-    const targetPlaybackSteps = await targetPlaybackCol.countDocuments(ownerFilter);
+    // ── Final count ──────────────────────────────────────────────────────────
+    const tgtBookCount = await tgtBooks.countDocuments(activeFilter);
+    const tgtLessonCount = await tgtLessons.countDocuments(ownerFilter);
+    const tgtStepCount = await tgtSteps.countDocuments(ownerFilter);
     console.log(
-      `[sync-test-to-kid] done targetBooks=${targetSummary.length} (curriculum=${targetCurriculum.length} puzzels-import=${targetPuzzle.length}) targetSteps=${targetSteps} playbackSteps=${targetPlaybackSteps}`
+      `[sync-test-to-kid] done targetBooks=${tgtBookCount} targetLessons=${tgtLessonCount} targetSteps=${tgtStepCount}`
     );
   } finally {
     await sourceConn.close();

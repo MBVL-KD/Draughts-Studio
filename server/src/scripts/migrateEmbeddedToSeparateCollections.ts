@@ -185,9 +185,12 @@ async function migrateBook(book: AnyRec, write: boolean, counters: Counters): Pr
   }
 
   // ── Update book: set lessonIds[], remove embedded lessons ─────────────────
+  // Use native driver for $unset — Mongoose strict mode ignores $unset of fields
+  // not present in the schema (lessons/exams were removed in v2).
   if (write && lessonIds.length > 0) {
-    await BookModel.updateOne(
-      { _id: (book as { _id: unknown })._id },
+    const nativeCollection = BookModel.collection;
+    await nativeCollection.updateOne(
+      { _id: (book as { _id: unknown })._id as import("mongoose").Types.ObjectId },
       {
         $set: { lessonIds },
         $unset: { lessons: "", exams: "" },
