@@ -15,9 +15,11 @@ const WRITE_MODE = process.argv.includes("--write");
 const PUZZELS_TAG = "puzzels-import";
 const TARGET_DBS = ["test", "kid_draughts"];
 
-const MONGO_URI =
-  process.env.MONGO_URI ||
-  "";
+const MONGO_URI = process.env.MONGO_URI;
+if (!MONGO_URI) {
+  console.error("ERROR: MONGO_URI environment variable is required.");
+  process.exit(1);
+}
 
 async function resetDb(db) {
   const dbName = db.databaseName;
