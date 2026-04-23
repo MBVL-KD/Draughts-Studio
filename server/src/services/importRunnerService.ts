@@ -543,7 +543,7 @@ export async function runImportJobOnce(
       action: "processed",
       jobId,
       itemId: doneItem.itemId,
-      importedStepId: appended.importedStep.stepId,
+      importedStepId: appended.stepId,
       counters: toCounterSnapshot(progressed),
       message: "Item processed successfully",
     };
