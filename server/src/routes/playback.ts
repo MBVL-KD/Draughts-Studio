@@ -1,5 +1,5 @@
 import express from "express";
-import { getStepById, upsertStep, patchStep, softDeleteStep } from "../repositories/stepRepository";
+import { getStepById, getStepsByLessonId, upsertStep, patchStep, softDeleteStep } from "../repositories/stepRepository";
 import { getLessonById } from "../repositories/lessonRepository";
 import { getBookById } from "../repositories/bookRepository";
 import { buildPlaybackPayload } from "../services/playbackService";
@@ -123,6 +123,16 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 export const playbackRouter = express.Router();
 
 // ─── Step CRUD ────────────────────────────────────────────────────────────────
+
+playbackRouter.get("/by-lesson/:lessonId", async (req: Req, res: Res) => {
+  try {
+    const owner = getOwnerContext(req);
+    const items = await getStepsByLessonId(owner, req.params.lessonId);
+    res.json({ items });
+  } catch (error) {
+    handleRouteError(res, error);
+  }
+});
 
 playbackRouter.get("/:stepId", async (req: Req, res: Res) => {
   try {

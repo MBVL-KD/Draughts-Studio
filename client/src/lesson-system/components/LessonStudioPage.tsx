@@ -76,7 +76,11 @@ import {
   getBook,
   listBooks,
 } from "../api/booksApi";
-import { persistCurriculumBookDocument } from "../api/lessonStorageApi";
+import {
+  persistCurriculumBookDocument,
+  hydrateBookWithLessons,
+  loadStepsForLesson,
+} from "../api/lessonStorageApi";
 import { createSource, listSources, patchSource } from "../api/sourcesApi";
 import { getStepPlayback } from "../api/playbackApi";
 import type { ApiError } from "../api/httpClient";
@@ -697,6 +701,7 @@ export default function LessonStudioPage() {
   const bookRevisionsRef = useRef(bookRevisions);
   bookRevisionsRef.current = bookRevisions;
   const compactImportHydratingRef = useRef<Record<string, boolean>>({});
+  const lessonStepsHydratingRef = useRef<Record<string, boolean>>({});
 
   const [autosaveBusy, setAutosaveBusy] = useState(false);
   const [autosaveHint, setAutosaveHint] = useState("");
@@ -767,6 +772,40 @@ export default function LessonStudioPage() {
         compactImportHydratingRef.current[bookId] = false;
       });
   }, [selectedBook]);
+
+  // Lazy-load steps for the selected lesson when it has no authoringV2 yet
+  useEffect(() => {
+    if (!selectedBookId || !selectedLessonId) return;
+    const book = books.find((b) => b.id === selectedBookId);
+    const lesson = book?.lessons.find((l) => l.id === selectedLessonId);
+    if (!lesson || lesson.authoringV2) return;
+    if (lessonStepsHydratingRef.current[selectedLessonId]) return;
+    lessonStepsHydratingRef.current[selectedLessonId] = true;
+    const bookId = book ? (book.bookId ?? book.id) : selectedBookId;
+    void loadStepsForLesson(lesson, bookId)
+      .then((authoringV2) => {
+        setBooks((prev) =>
+          prev.map((b) => {
+            if ((b.bookId ?? b.id) !== bookId) return b;
+            return {
+              ...b,
+              lessons: b.lessons.map((l) =>
+                l.id === selectedLessonId ? { ...l, authoringV2 } : l
+              ),
+            };
+          })
+        );
+        // Select first step if none selected
+        const firstStepId = authoringV2.authoringLesson.stepIds[0] ?? null;
+        setSelectedStepId((prev) => prev ?? firstStepId);
+      })
+      .catch(() => {
+        // Leave lesson without steps; user can retry.
+      })
+      .finally(() => {
+        lessonStepsHydratingRef.current[selectedLessonId] = false;
+      });
+  }, [selectedLessonId, selectedBookId, books]);
 
   const curriculumPersistPreview = useMemo(() => {
     if (!selectedBook) return null;
@@ -1321,10 +1360,13 @@ export default function LessonStudioPage() {
         }),
         listSources({ sort: "updatedAt_desc", limit: 400 }),
       ]);
-      const nextBooks = asArray<Book>(booksResponse?.items).map(normalizeBookFromServer);
+      const rawBooks = asArray<Book>(booksResponse?.items);
       const nextSources = asArray<SourceDocument>(sourcesResponse?.items).map(
         normalizeSourceFromServer
       );
+      // Hydrate each book with lesson metadata from the lessons collection
+      const hydratedBooks = await Promise.all(rawBooks.map((b) => hydrateBookWithLessons(b)));
+      const nextBooks = hydratedBooks.map(normalizeBookFromServer);
       setBooks(nextBooks);
       setSources(nextSources);
       syncRevisionMaps(nextBooks, nextSources);
@@ -1337,10 +1379,10 @@ export default function LessonStudioPage() {
       setCurriculumSaveStatus("saved");
       const nextBook = nextBooks[0] ?? null;
       const nextLesson = nextBook?.lessons[0] ?? null;
-      const nextStep = nextLesson?.steps?.[0] ?? null;
+      const nextStep = nextLesson?.authoringV2?.authoringLesson?.stepIds?.[0] ?? null;
       setSelectedBookId(nextBook?.id ?? null);
       setSelectedLessonId(nextLesson?.id ?? null);
-      setSelectedStepId(nextStep?.id ?? null);
+      setSelectedStepId(nextStep ?? null);
       setSelectedSourceId(nextSources[0]?.id ?? null);
       setSyncMessage("Loaded latest books and sources from server.");
     } catch (error) {

@@ -1,6 +1,8 @@
-import type { Book, Lesson } from "../types/lessonTypes";
+import type { Book, Lesson, LessonAuthoringBundle } from "../types/lessonTypes";
 import type { ApiError } from "./httpClient";
 import { createBook, getBook, listBooks, patchBook } from "./booksApi";
+import { getLessonsByBook } from "./lessonsApi";
+import { getStepsByLesson } from "./stepsApi";
 import { apiPost } from "./httpClient";
 
 export type PersistCurriculumBookParams = {
@@ -95,6 +97,71 @@ export async function persistCurriculumBookDocument(
   );
 
   return bookResponse;
+}
+
+/**
+ * Fetches all steps for a lesson and assembles an authoringV2 bundle.
+ * Call this when a lesson is first opened for editing.
+ */
+export async function loadStepsForLesson(
+  lesson: Lesson,
+  bookId: string,
+  signal?: AbortSignal
+): Promise<LessonAuthoringBundle> {
+  const lessonId = lesson.lessonId ?? lesson.id;
+  const stepsResponse = await getStepsByLesson(lessonId, { signal });
+  const steps = stepsResponse?.items ?? [];
+  const stepsById = Object.fromEntries(
+    steps.map((s) => {
+      const id = (s as { stepId?: string; id?: string }).stepId ?? (s as { id?: string }).id ?? "";
+      return [id, s];
+    })
+  );
+  const stepIds =
+    (lesson as unknown as { stepIds?: string[] }).stepIds ??
+    steps.map((s) => (s as { stepId?: string; id?: string }).stepId ?? (s as { id?: string }).id ?? "").filter(Boolean);
+  const entryStepId =
+    (lesson as unknown as { entryStepId?: string }).entryStepId ?? stepIds[0] ?? "";
+
+  return {
+    authoringLesson: {
+      id: lessonId,
+      bookId,
+      slug: lessonId,
+      title: lesson.title,
+      entryStepId,
+      stepIds,
+    },
+    stepsById,
+    branchesById: (lesson as unknown as { branchesById?: LessonAuthoringBundle["branchesById"] }).branchesById,
+  };
+}
+
+/**
+ * Hydrates a book with lesson metadata from the server (without steps).
+ * Used during initial load so the sidebar can show lesson names.
+ * Steps are loaded lazily via `loadStepsForLesson` when a lesson is opened.
+ */
+export async function hydrateBookWithLessons(book: Book, signal?: AbortSignal): Promise<Book> {
+  const bookId = (book.bookId ?? book.id) as string;
+  if (!bookId) return book;
+  try {
+    const response = await getLessonsByBook(bookId, { signal });
+    const lessons: Lesson[] = (response?.items ?? []).map((l) => {
+      const raw = l as unknown as Record<string, unknown>;
+      const lessonId = String(raw.lessonId ?? raw.id ?? "");
+      return {
+        ...(l as Lesson),
+        id: lessonId,
+        lessonId,
+        steps: [],
+        authoringV2: undefined,
+      };
+    });
+    return { ...book, lessons };
+  } catch {
+    return book;
+  }
 }
 
 export function formatStorageApiError(error: unknown, fallback: string): string {
