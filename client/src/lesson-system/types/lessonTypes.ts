@@ -68,6 +68,10 @@ export type Lesson = {
 
   steps: LessonStep[];
 
+  /** Ordered step IDs from the server (v2); populated by hydrateBookWithLessons. */
+  stepIds?: string[];
+  entryStepId?: string;
+
   /**
    * When present, the curriculum sidebar and timeline editor use this model.
    * Legacy `steps` remains for board / preview stubs until those views migrate.

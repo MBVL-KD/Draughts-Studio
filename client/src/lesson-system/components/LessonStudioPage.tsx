@@ -822,12 +822,19 @@ export default function LessonStudioPage() {
   }, [selectedBook]);
 
   const applyStoredCurriculumBook = useCallback((storedBook: Book, bookId: string) => {
-    curriculumSnapshotRef.current[bookId] = stableStringifyBookForSnapshot(
-      normalizeBookForSave(storedBook)
-    );
-    setBooks((prev) =>
-      prev.map((book) => (getDocumentId(book) === bookId ? storedBook : book))
-    );
+    setBooks((prev) => {
+      // Server no longer returns embedded lessons — keep the in-memory lessons that
+      // were hydrated from the lessons collection so they don't disappear after save.
+      const existing = prev.find((b) => getDocumentId(b) === bookId);
+      const merged: Book =
+        existing && existing.lessons.length > 0
+          ? { ...storedBook, lessons: existing.lessons }
+          : storedBook;
+      curriculumSnapshotRef.current[bookId] = stableStringifyBookForSnapshot(
+        normalizeBookForSave(merged)
+      );
+      return prev.map((book) => (getDocumentId(book) === bookId ? merged : book));
+    });
     setBookRevisions((prev) => ({
       ...prev,
       [bookId]: getDocumentRevision(storedBook),

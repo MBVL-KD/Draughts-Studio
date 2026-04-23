@@ -23,7 +23,13 @@ async function saveLesson(lesson: Lesson, bookId: string, signal?: AbortSignal):
   const authoringBundle = lesson.authoringV2;
   const stepIds = authoringBundle
     ? [...(authoringBundle.authoringLesson.stepIds ?? [])]
-    : (lesson.steps ?? []).map((s) => s.stepId ?? s.id ?? "").filter(Boolean);
+    : lesson.stepIds?.length
+      ? [...lesson.stepIds]
+      : (lesson.steps ?? []).map((s) => s.stepId ?? s.id ?? "").filter(Boolean);
+
+  // Don't save a lesson that has never been loaded (no authoringV2, no steps, no stepIds)
+  // — doing so would overwrite the server's stepIds with an empty array.
+  if (!authoringBundle && stepIds.length === 0 && (lesson.steps ?? []).length === 0) return;
 
   const lessonDocument = {
     id: lessonId,
