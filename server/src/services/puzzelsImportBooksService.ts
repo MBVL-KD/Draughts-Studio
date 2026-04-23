@@ -28,6 +28,27 @@ function normalizeCollectionTitle(raw: string): string {
   return raw.replace(/\s+/g, " ").trim().slice(0, 200) || "Collectie";
 }
 
+// Known Dutch→English translations for Slagzet collection names.
+// Keys are lowercase Dutch labels; values are the English display names.
+const COLLECTION_TITLE_EN: Record<string, string> = {
+  "beginner": "Beginner",
+  "gevorderd": "Advanced",
+  "gevorderden": "Advanced",
+  "expert": "Expert",
+  "intermediate": "Intermediate",
+  "slagzet van de dag": "Daily Puzzle",
+  "slagzet-van-de-dag": "Daily Puzzle",
+  "combinaties": "Combinations",
+  "eindspel": "Endgame",
+  "opening": "Opening",
+  "openingen": "Openings",
+  "damcombinaties": "Dam Combinations",
+};
+
+function translateCollectionTitleToEn(nlLabel: string): string {
+  return COLLECTION_TITLE_EN[nlLabel.trim().toLowerCase()] ?? nlLabel;
+}
+
 function parseCollectionPartNumber(title: string, baseLabel: string): number {
   const normalized = normalizeText(title);
   if (!normalized) return -1;
@@ -108,14 +129,15 @@ async function ensureCollectionLesson(
   }
 
   const nextPart = matchingLessons.length > 0 ? matchingLessons[matchingLessons.length - 1].part + 1 : 1;
-  const lessonTitle = buildLessonTitle(titleNorm, nextPart);
+  const nlTitle = buildLessonTitle(titleNorm, nextPart);
+  const enTitle = buildLessonTitle(translateCollectionTitleToEn(titleNorm), nextPart);
   const lessonId = randomUUID();
 
   await createLesson(owner, {
     id: lessonId,
     lessonId,
     bookId,
-    title: { values: { en: lessonTitle, nl: lessonTitle } },
+    title: { values: { nl: nlTitle, en: enTitle } },
     description: { values: { en: "", nl: "" } },
     variantId: "international",
     rulesetId: "classic",
