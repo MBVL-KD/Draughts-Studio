@@ -469,6 +469,40 @@ export async function runImportJobOnce(
       };
     }
 
+    // If scan was enabled but produced no valid move sequence, skip rather than save an empty puzzle.
+    const askMoment = Array.isArray((step as Record<string, unknown>).timeline)
+      ? ((step as Record<string, unknown>).timeline as Record<string, unknown>[]).find(
+          (m) => (m as Record<string, unknown>).type === "askSequence"
+        )
+      : undefined;
+    const expectedSeq = (askMoment as Record<string, unknown> | undefined)
+      ?.interaction as Record<string, unknown> | undefined;
+    const hasExpectedMoves =
+      Array.isArray(expectedSeq?.expectedSequence) &&
+      (expectedSeq.expectedSequence as unknown[]).length > 0;
+    if (!hasExpectedMoves) {
+      const noSeqSkipped = await markItemSkipped(
+        owner,
+        processingItem.itemId,
+        { reason: "Skipped: scan produced no valid move sequence for this position." },
+        processingItem.revision
+      );
+      const progressed = await incrementJobProgress(
+        owner,
+        jobId,
+        { processedItemsInc: 1, currentIndex: pendingItem.index },
+        job.revision
+      );
+      logTiming("skip_no_scan_sequence");
+      return {
+        action: "processed",
+        jobId,
+        itemId: noSeqSkipped.itemId,
+        counters: toCounterSnapshot(progressed),
+        message: "Skipped: no valid move sequence from scan.",
+      };
+    }
+
     const appendStartedAt = Date.now();
     let appended: Awaited<ReturnType<typeof appendImportedPuzzleStep>> | null = null;
     let appendErr: unknown = null;

@@ -115,7 +115,9 @@ export function convertSlagzetItemToAuthoringStep(input: {
     sourceText,
   });
 
-  // Source text from Slagzet encodes the move sequence (space-separated notations)
+  // Source text from Slagzet encodes the move sequence (space-separated notations).
+  // When sourceText is absent (most Slagzet pages), expectedSequence starts empty and
+  // is populated by the engine scan PV via applyScanResultToImportedStep.
   const rawMoves = sourceText
     ? sourceText
         .split(/\s+/)
@@ -123,8 +125,10 @@ export function convertSlagzetItemToAuthoringStep(input: {
         .filter(Boolean)
     : [];
 
+  // If sourceText provided moves but none resolved, the FEN/notation is corrupt — bail.
+  // If no sourceText at all, proceed with empty sequence for scan to fill.
   const expectedSequence = resolveExpectedSequence(fen, rawMoves);
-  if (expectedSequence.length === 0) return null;
+  if (rawMoves.length > 0 && expectedSequence.length === 0) return null;
 
   const sourceId = `external:${job.sourceType}:${job.collectionSlug}`;
 
