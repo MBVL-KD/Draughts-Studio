@@ -60,7 +60,13 @@ const COACH_MODES: CoachAction["mode"][] = ["bubble", "panel", "voice", "caption
 
 const COACH_TONE_OPTIONS: { value: CoachTone; en: string; nl: string }[] = [
   { value: "neutral", en: "Neutral", nl: "Neutraal" },
+  { value: "thinking", en: "Thinking", nl: "Denkend" },
   { value: "warm", en: "Explain / calm", nl: "Uitleg / rustig" },
+  { value: "encouraging", en: "Encouraging", nl: "Bemoedigend" },
+  { value: "surprised", en: "Surprised", nl: "Verrast" },
+  { value: "confused", en: "Confused", nl: "Verward" },
+  { value: "proud", en: "Proud", nl: "Trots" },
+  { value: "playful", en: "Playful", nl: "Speels" },
   { value: "excited", en: "Excited", nl: "Enthousiast" },
   { value: "warning", en: "Warning", nl: "Waarschuwing" },
   { value: "corrective", en: "Correction", nl: "Correctie" },

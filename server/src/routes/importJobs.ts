@@ -380,7 +380,14 @@ importJobsRouter.post("/:jobId/run", async (req: Req, res: Res) => {
           jobId: req.params.jobId,
           message: "No processing actions executed",
         };
-    res.json({ item });
+    const batchSteps = results.map((r) => ({
+      action: r.action,
+      message: r.message,
+      itemId: r.itemId,
+      importedStepId: r.importedStepId,
+      counters: r.counters,
+    }));
+    res.json({ item, batchSteps });
   } catch (error) {
     handleRouteError(res, error);
   }

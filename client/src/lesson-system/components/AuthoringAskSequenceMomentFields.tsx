@@ -113,11 +113,21 @@ export default function AuthoringAskSequenceMomentFields({
   const hintSquaresPlain = formatCommaSquares(ix.wrongHintHighlightSquares);
   const hintPlan = Array.isArray(ix.hintPlan) ? ix.hintPlan : [];
   const hintTypeOptions: Array<{
-    id: "from" | "to" | "from_to" | "path" | "captures" | "last_capture_leg";
+    id:
+      | "path_pulse_stepwise"
+      | "from"
+      | "path_numbers"
+      | "to"
+      | "from_to"
+      | "path"
+      | "captures"
+      | "last_capture_leg";
     en: string;
     nl: string;
   }> = [
+    { id: "path_pulse_stepwise", en: "Path pulse (stepwise)", nl: "Pad pulse (stap-voor-stap)" },
     { id: "from", en: "From square", nl: "Van-veld" },
+    { id: "path_numbers", en: "Path with numbers", nl: "Pad met nummers" },
     { id: "to", en: "To square", nl: "Naar-veld" },
     { id: "from_to", en: "From + to", nl: "Van + naar" },
     { id: "path", en: "Full path", nl: "Volledig pad" },
@@ -137,8 +147,10 @@ export default function AuthoringAskSequenceMomentFields({
   };
 
   const addHintPlanStep = () => {
+    const defaultType: NonNullable<AskSequenceInteraction["hintPlan"]>[number]["type"] =
+      hintPlan.length === 0 ? "path_pulse_stepwise" : "from";
     patchIx({
-      hintPlan: [...hintPlan, { type: "from", afterFailedAttempts: hintPlan.length + 1 }],
+      hintPlan: [...hintPlan, { type: defaultType, afterFailedAttempts: hintPlan.length + 1 }],
     });
   };
 

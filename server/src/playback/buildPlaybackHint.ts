@@ -95,3 +95,57 @@ export function buildPlaybackHintPayload(
   }
   return out;
 }
+
+/**
+ * V2-native hint builder: reads hint text from runtimeHints and first expected
+ * move from the askSequence moment in the timeline.
+ */
+export function buildPlaybackHintFromV2Step(
+  step: Record<string, unknown>,
+  language: string
+): PlaybackHintPayload | null {
+  const hints = step.runtimeHints as Record<string, unknown> | undefined;
+  const hintText = typeof hints?.scanBestMove === "string" ? hints.scanBestMove : "";
+
+  const initialState = step.initialState as Record<string, unknown> | undefined;
+  const initialFen = String(initialState?.fen ?? "").trim();
+
+  const timeline = Array.isArray(step.timeline) ? step.timeline : [];
+  const askMoment = timeline.find((m: unknown) => {
+    const moment = m as Record<string, unknown>;
+    return (
+      moment?.type === "askSequence" &&
+      (moment.interaction as Record<string, unknown> | undefined)?.kind === "askSequence"
+    );
+  }) as Record<string, unknown> | undefined;
+
+  const interaction = askMoment?.interaction as Record<string, unknown> | undefined;
+  const expectedSequence = Array.isArray(interaction?.expectedSequence)
+    ? (interaction.expectedSequence as Record<string, unknown>[])
+    : [];
+
+  let expectedFrom: number | undefined;
+  let expectedTo: number | undefined;
+
+  if (expectedSequence.length > 0 && initialFen) {
+    const first = expectedSequence[0];
+    const from = Number(first?.from);
+    const to = Number(first?.to);
+    if (Number.isFinite(from) && Number.isFinite(to)) {
+      expectedFrom = from;
+      expectedTo = to;
+    }
+  }
+
+  const hasText = hintText.trim().length > 0;
+  const hasSquares = expectedFrom !== undefined && expectedTo !== undefined;
+  if (!hasText && !hasSquares) return null;
+
+  const out: PlaybackHintPayload = {};
+  if (hasText) out.text = hintText.trim();
+  if (hasSquares) {
+    out.expectedFrom = expectedFrom;
+    out.expectedTo = expectedTo;
+  }
+  return out;
+}

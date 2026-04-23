@@ -1,6 +1,7 @@
 import type { Book } from "../types/lessonTypes";
 import type { LocalizedText } from "../types/i18nTypes";
 import { findMissingLocalizedTexts } from "./findMissingLocalizedTexts";
+import { stripBookRootPrefixForI18nPath } from "./stripBookI18nPath";
 
 export type MissingTextExportEntry = {
   path: string;
@@ -29,7 +30,7 @@ function tokenizePath(path: string): Array<string | number> {
 
 function readByPath(input: unknown, path: string): unknown {
   let cursor: unknown = input;
-  for (const token of tokenizePath(path)) {
+  for (const token of tokenizePath(stripBookRootPrefixForI18nPath(path))) {
     if (typeof token === "number") {
       if (!Array.isArray(cursor)) return undefined;
       cursor = cursor[token];

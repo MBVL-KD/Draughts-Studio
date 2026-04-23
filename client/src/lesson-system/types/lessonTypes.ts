@@ -25,6 +25,22 @@ export type Book = {
   archivedAt?: string | null;
   title: LocalizedText;
   description?: LocalizedText;
+  /** Shop entitlement model for runtime book unlocks. */
+  accessModel?: "free" | "paid";
+  /** External product/SKU id (required when accessModel = paid in production policy). */
+  productId?: string;
+  /** Optional merch/shop metadata (display only). */
+  shopTag?: string;
+  /** Optional deterministic ordering across books for campaign flows. */
+  sequenceIndex?: number;
+  /** Optional unlock gates for this book (e.g. prior exam completion). */
+  unlockRules?: {
+    type: "none" | "requires_exams";
+    requiredBookId?: string;
+    /** Explicit exam lesson ids; when empty runtime may resolve all `isExam` lessons in requiredBookId. */
+    requiredExamLessonIds?: string[];
+    requiredPassMode?: "all" | "any";
+  };
   lessons: Lesson[];
   exams?: Exam[];
 };
@@ -34,6 +50,14 @@ export type Lesson = {
   lessonId?: string;
   title: LocalizedText;
   description?: LocalizedText;
+  /** Marks this lesson as an exam lesson in campaign unlock logic. */
+  isExam?: boolean;
+  examConfig?: {
+    passScorePercent?: number;
+    minCorrect?: number;
+    maxAttempts?: number;
+    timeLimitSec?: number;
+  };
 
   variantId: string;
   rulesetId?: string;

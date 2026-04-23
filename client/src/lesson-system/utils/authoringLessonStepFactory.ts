@@ -11,7 +11,7 @@ export function createDefaultAuthoringLessonStep(lessonId: string): AuthoringLes
     lessonId,
     kind: "explain",
     orderIndex: 0,
-    title: createLocalizedText("New step", ""),
+    title: createLocalizedText(),
     initialState: {
       fen: "",
       sideToMove: "white",

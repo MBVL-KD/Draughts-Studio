@@ -1,5 +1,6 @@
-import type { Book } from "../types/lessonTypes";
+import type { Book, Lesson } from "../types/lessonTypes";
 import type { LocalizedText } from "../types/i18nTypes";
+import { stripBookRootPrefixForI18nPath } from "./stripBookI18nPath";
 
 export type TranslatedTextPatch = {
   path: string;
@@ -52,7 +53,7 @@ function mergeValues(
 }
 
 function setByPath(root: unknown, path: string, incoming: Record<string, string>): void {
-  const tokens = tokenizePath(path);
+  const tokens = tokenizePath(stripBookRootPrefixForI18nPath(path));
   if (tokens.length === 0) return;
   let cursor: unknown = root;
   for (let index = 0; index < tokens.length - 1; index += 1) {
@@ -114,6 +115,43 @@ export function applyTranslatedTexts(
         }))
       : [],
   };
+
+  next.lessons = next.lessons.map((lesson) => {
+    const authoring = lesson.authoringV2;
+    if (!authoring || typeof authoring !== "object") return lesson;
+    const authoringLesson =
+      authoring.authoringLesson && typeof authoring.authoringLesson === "object"
+        ? { ...authoring.authoringLesson }
+        : authoring.authoringLesson;
+    const stepsByIdRaw =
+      authoring.stepsById && typeof authoring.stepsById === "object" ? authoring.stepsById : {};
+    const stepsById = Object.fromEntries(
+      Object.entries(stepsByIdRaw).map(([stepId, stepNode]) => {
+        if (!stepNode || typeof stepNode !== "object") return [stepId, stepNode];
+        const timeline = Array.isArray((stepNode as { timeline?: unknown[] }).timeline)
+          ? ((stepNode as { timeline: unknown[] }).timeline ?? []).map((moment) => {
+              if (!moment || typeof moment !== "object") return moment;
+              const nextMoment = { ...moment } as Record<string, unknown>;
+              if (Array.isArray((moment as { coach?: unknown[] }).coach)) {
+                nextMoment.coach = ((moment as { coach: unknown[] }).coach ?? []).map((coach) =>
+                  coach && typeof coach === "object" ? { ...coach } : coach
+                );
+              }
+              return nextMoment;
+            })
+          : (stepNode as { timeline?: unknown[] }).timeline;
+        return [stepId, { ...stepNode, ...(timeline ? { timeline } : {}) }];
+      })
+    );
+    return {
+      ...lesson,
+      authoringV2: {
+        ...authoring,
+        ...(authoringLesson ? { authoringLesson } : {}),
+        stepsById: stepsById as NonNullable<Lesson["authoringV2"]>["stepsById"],
+      },
+    };
+  });
 
   translations.forEach((patch) => {
     if (!patch?.path || !patch.values || typeof patch.values !== "object") return;

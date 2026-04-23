@@ -18,6 +18,16 @@ export function createEmptyBook(): Book {
     status: "draft",
     title: createLocalizedText("New book", ""),
     description: createLocalizedText("", ""),
+    accessModel: "free",
+    productId: "",
+    shopTag: "",
+    sequenceIndex: 1,
+    unlockRules: {
+      type: "none",
+      requiredBookId: "",
+      requiredExamLessonIds: [],
+      requiredPassMode: "all",
+    },
     lessons: [lesson],
     exams: [],
   };
@@ -35,6 +45,13 @@ export function createEmptyLesson(bookId: string): Lesson {
     rulesetId: "classic",
     difficulty: 1,
     estimatedMinutes: 5,
+    isExam: false,
+    examConfig: {
+      passScorePercent: 70,
+      minCorrect: undefined,
+      maxAttempts: undefined,
+      timeLimitSec: undefined,
+    },
     rewards: [],
   };
   const authoringV2 = createEmptyAuthoringBundle(bookId, draft);

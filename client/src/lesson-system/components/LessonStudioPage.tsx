@@ -72,7 +72,7 @@ import type {
   SourceKind,
 } from "../types/analysisTypes";
 import {
-  autoTranslateMissingI18n,
+  fillBookMissingI18nFromExport,
   getBook,
   listBooks,
 } from "../api/booksApi";
@@ -1318,7 +1318,6 @@ export default function LessonStudioPage() {
           sort: "updatedAt_desc",
           limit: 50,
           includeImport: true,
-          compactImport: true,
         }),
         listSources({ sort: "updatedAt_desc", limit: 400 }),
       ]);
@@ -1587,27 +1586,40 @@ export default function LessonStudioPage() {
     setSyncMessage("");
     setAutoTranslateBusy(true);
     try {
-      const { item: result } = await autoTranslateMissingI18n(false);
-      const summaryNl = `Auto-vertalen afgerond (${result.updatedBooks} boeken bijgewerkt, ${result.filledEnCount} EN / ${result.filledNlCount} NL velden).`;
-      const summaryEn = `Auto-translate finished (${result.updatedBooks} books updated, ${result.filledEnCount} EN / ${result.filledNlCount} NL fields).`;
+      if (!selectedBook) {
+        setSyncError(
+          editorLanguage === "nl"
+            ? "Geen boek geselecteerd om te vertalen."
+            : "No book selected to translate."
+        );
+        return;
+      }
+      const safeBook = normalizeBookForSave(selectedBook);
+      const entries = exportMissingTexts(safeBook, ["en", "nl"]);
+      if (entries.length === 0) {
+        setSyncMessage(
+          editorLanguage === "nl"
+            ? "Geen ontbrekende EN/NL-velden in dit boek."
+            : "No missing EN/NL fields in this book."
+        );
+        return;
+      }
+      const bookId = getDocumentId(safeBook);
+      const expectedRevision = getDocumentRevision(safeBook);
+      const { item: result } = await fillBookMissingI18nFromExport(bookId, {
+        expectedRevision,
+        entries,
+        dryRun: false,
+      });
+      const summaryNl = `Auto-vertalen afgerond (${result.pathsProcessed} velden bijgewerkt, ${result.filledEnCount} EN / ${result.filledNlCount} NL, ${result.pathsSkippedNoSource} overgeslagen).`;
+      const summaryEn = `Auto-translate finished (${result.pathsProcessed} fields updated, ${result.filledEnCount} EN / ${result.filledNlCount} NL, ${result.pathsSkippedNoSource} skipped).`;
       const summary = editorLanguage === "nl" ? summaryNl : summaryEn;
-      if (selectedBookId) {
-        try {
-          const bookRes = await getBook(selectedBookId);
-          const storedBook = normalizeBookFromServer(bookRes.item);
-          applyStoredCurriculumBook(storedBook, selectedBookId);
-          setSyncMessage(
-            `${summary} ${editorLanguage === "nl" ? "Huidig boek vernieuwd." : "Current book refreshed."}`
-          );
-        } catch {
-          setSyncMessage(
-            `${summary} ${
-              editorLanguage === "nl"
-                ? "Open dit boek opnieuw van de server om wijzigingen te zien."
-                : "Re-open this book from the server to see changes."
-            }`
-          );
-        }
+      if (result.book) {
+        const storedBook = normalizeBookFromServer(result.book as Book);
+        applyStoredCurriculumBook(storedBook, bookId);
+        setSyncMessage(
+          `${summary} ${editorLanguage === "nl" ? "Huidig boek bijgewerkt." : "Current book updated."}`
+        );
       } else {
         setSyncMessage(summary);
       }
@@ -3963,8 +3975,8 @@ export default function LessonStudioPage() {
                   style={secondaryActionButtonStyle}
                   title={
                     editorLanguage === "nl"
-                      ? "Vult ontbrekende EN/NL-teksten op de server (alle boeken)"
-                      : "Fills missing EN/NL texts on the server (all books)"
+                      ? "Vult ontbrekende EN/NL op basis van dezelfde scan als ‘Exporteer ontbrekende teksten’, alleen voor het geselecteerde boek."
+                      : "Fills missing EN/NL using the same scan as ‘Export missing texts’, for the selected book only."
                   }
                 >
                   {autoTranslateBusy

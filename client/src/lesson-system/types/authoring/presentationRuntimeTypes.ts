@@ -15,7 +15,13 @@ export type TimingSpec = {
 
 export type CoachTone =
   | "neutral"
+  | "thinking"
   | "warm"
+  | "encouraging"
+  | "surprised"
+  | "confused"
+  | "proud"
+  | "playful"
   | "excited"
   | "warning"
   | "corrective"

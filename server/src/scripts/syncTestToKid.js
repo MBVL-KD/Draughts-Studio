@@ -9,12 +9,15 @@ function parseFlags() {
   const sourceDbArg = args.find((arg) => arg.startsWith("--sourceDb="));
   const targetDbArg = args.find((arg) => arg.startsWith("--targetDb="));
   const write = args.includes("--write");
+  /** If true: only puzzels-import (legacy). If false: all non-deleted books for owner (curriculum + puzzels). */
+  const puzzlesOnly = args.includes("--puzzles-only");
   return {
     ownerType: ownerTypeArg ? ownerTypeArg.slice("--ownerType=".length).trim() : "user",
     ownerId: ownerIdArg ? ownerIdArg.slice("--ownerId=".length).trim() : "dev-user-1",
     sourceDb: sourceDbArg ? sourceDbArg.slice("--sourceDb=".length).trim() : "test",
     targetDb: targetDbArg ? targetDbArg.slice("--targetDb=".length).trim() : "kid_draughts",
     write,
+    puzzlesOnly,
   };
 }
 
@@ -39,12 +42,15 @@ function summarizeBooks(books) {
         steps += lesson.steps.length;
       }
     }
+    const tags = Array.isArray(book.tags) ? book.tags : [];
+    const isPuzzelsImport = tags.includes("puzzels-import");
     return {
       bookId: book.bookId || book.id || "",
       sequenceIndex: Number.isFinite(Number(book.sequenceIndex)) ? Number(book.sequenceIndex) : null,
       lessons: lessons.length,
       steps,
       bytes: Buffer.byteLength(JSON.stringify(book)),
+      isPuzzelsImport,
     };
   });
 }
@@ -63,10 +69,14 @@ function runTargetCommand(targetUri, command, extraArgs) {
 async function run() {
   const baseUri = process.env.MONGO_URI;
   if (!baseUri) throw new Error("MONGO_URI missing");
-  const { ownerType, ownerId, sourceDb, targetDb, write } = parseFlags();
+  const { ownerType, ownerId, sourceDb, targetDb, write, puzzlesOnly } = parseFlags();
   const sourceUri = dbUriFromBase(baseUri, sourceDb);
   const targetUri = dbUriFromBase(baseUri, targetDb);
   const ownerFilter = { ownerType, ownerId };
+  const activeBookFilter = {
+    ...ownerFilter,
+    $or: [{ isDeleted: false }, { isDeleted: { $exists: false } }],
+  };
 
   const sourceConn = await mongoose.createConnection(sourceUri).asPromise();
   const targetConn = await mongoose.createConnection(targetUri).asPromise();
@@ -75,30 +85,41 @@ async function run() {
     const targetBooksCol = targetConn.db.collection("books");
     const targetPlaybackCol = targetConn.db.collection("playback_steps");
 
-    const sourceBooks = await sourceBooksCol
-      .find({ ...ownerFilter, isDeleted: false, tags: "puzzels-import" })
-      .toArray();
+    const sourceQuery = puzzlesOnly
+      ? { ...ownerFilter, isDeleted: false, tags: "puzzels-import" }
+      : activeBookFilter;
+
+    const sourceBooks = await sourceBooksCol.find(sourceQuery).toArray();
     const sourceSummary = summarizeBooks(sourceBooks);
     const sourceSteps = sourceSummary.reduce((sum, row) => sum + row.steps, 0);
+    const puzzleRows = sourceSummary.filter((r) => r.isPuzzelsImport);
+    const curriculumRows = sourceSummary.filter((r) => !r.isPuzzelsImport);
 
     console.log(
-      `[sync-test-to-kid] source=${sourceDb} target=${targetDb} owner=${ownerType}:${ownerId} write=${write}`
+      `[sync-test-to-kid] source=${sourceDb} target=${targetDb} owner=${ownerType}:${ownerId} write=${write} mode=${puzzlesOnly ? "puzzles-only" : "all-owner-books"}`
     );
     console.log(
-      `[sync-test-to-kid] sourcePuzzleBooks=${sourceSummary.length} sourcePuzzleSteps=${sourceSteps}`
+      `[sync-test-to-kid] sourceBooks=${sourceSummary.length} (curriculum=${curriculumRows.length} puzzels-import=${puzzleRows.length}) sourceSteps=${sourceSteps}`
     );
     sourceSummary.forEach((row) => {
+      const kind = row.isPuzzelsImport ? "puzzels" : "curriculum";
       console.log(
-        `[sync-test-to-kid] source book=${row.bookId} seq=${row.sequenceIndex} lessons=${row.lessons} steps=${row.steps} bytes=${row.bytes}`
+        `[sync-test-to-kid] source [${kind}] book=${row.bookId} seq=${row.sequenceIndex} lessons=${row.lessons} steps=${row.steps} bytes=${row.bytes}`
       );
     });
 
     if (!write) {
-      console.log("[sync-test-to-kid] dry-run only (use --write to apply)");
+      console.log(
+        "[sync-test-to-kid] dry-run only (use --write to apply). Full sync replaces ALL books for this owner on target unless --puzzles-only."
+      );
       return;
     }
 
-    await targetBooksCol.deleteMany({ ...ownerFilter, tags: "puzzels-import" });
+    if (puzzlesOnly) {
+      await targetBooksCol.deleteMany({ ...ownerFilter, tags: "puzzels-import" });
+    } else {
+      await targetBooksCol.deleteMany(ownerFilter);
+    }
     await targetPlaybackCol.deleteMany(ownerFilter);
 
     if (sourceBooks.length > 0) {
@@ -109,7 +130,7 @@ async function run() {
       await targetBooksCol.insertMany(cloned, { ordered: false });
     }
     console.log(
-      `[sync-test-to-kid] copiedPuzzleBooks=${sourceBooks.length} from ${sourceDb} to ${targetDb}`
+      `[sync-test-to-kid] copiedBooks=${sourceBooks.length} from ${sourceDb} to ${targetDb}`
     );
 
     runTargetCommand(targetUri, "split:large-puzzels-books", [
@@ -122,15 +143,14 @@ async function run() {
       `--ownerId=${ownerId}`,
     ]);
 
-    const targetBooks = await targetBooksCol
-      .find({ ...ownerFilter, isDeleted: false, tags: "puzzels-import" })
-      .sort({ sequenceIndex: 1 })
-      .toArray();
+    const targetBooks = await targetBooksCol.find(activeBookFilter).toArray();
     const targetSummary = summarizeBooks(targetBooks);
     const targetSteps = targetSummary.reduce((sum, row) => sum + row.steps, 0);
+    const targetPuzzle = targetSummary.filter((r) => r.isPuzzelsImport);
+    const targetCurriculum = targetSummary.filter((r) => !r.isPuzzelsImport);
     const targetPlaybackSteps = await targetPlaybackCol.countDocuments(ownerFilter);
     console.log(
-      `[sync-test-to-kid] done targetPuzzleBooks=${targetSummary.length} targetPuzzleSteps=${targetSteps} playbackSteps=${targetPlaybackSteps}`
+      `[sync-test-to-kid] done targetBooks=${targetSummary.length} (curriculum=${targetCurriculum.length} puzzels-import=${targetPuzzle.length}) targetSteps=${targetSteps} playbackSteps=${targetPlaybackSteps}`
     );
   } finally {
     await sourceConn.close();

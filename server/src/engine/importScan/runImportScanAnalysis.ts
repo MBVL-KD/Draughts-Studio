@@ -2,6 +2,22 @@ import { mapVariantToScanVariant } from "../scan/mapVariantToScanVariant";
 import type { ImportScanResult } from "../../types/importTypes";
 import { loadScanModuleForImport } from "./loadScanModuleForImport";
 
+/** Deep scans can stall the import job; callers may skip the puzzle on this error. */
+export class ImportScanTimeoutError extends Error {
+  override name = "ImportScanTimeoutError";
+  constructor(
+    public readonly depth: number,
+    public readonly fenPreview: string,
+    public readonly timeoutMs: number
+  ) {
+    super(`Import scan exceeded ${timeoutMs}ms at depth ${depth} (fen ${fenPreview.slice(0, 48)}…)`);
+  }
+}
+
+const IMPORT_SCAN_TIMEOUT_MS = 5000;
+/** Apply wall-clock cap only for heavy engine settings (Slagzet import “level 25” class). */
+const IMPORT_SCAN_TIMEOUT_MIN_DEPTH = 22;
+
 export async function runImportScanAnalysis(params: {
   variantId: string;
   fen: string;
@@ -30,12 +46,25 @@ export async function runImportScanAnalysis(params: {
       : 1;
 
   const api = await loadScanModuleForImport();
-  const analyzed = await api.analyze({
-    variant: mappedVariant,
-    fen,
-    depth,
-    multiPv,
-  });
+  const runAnalyze = () =>
+    api.analyze({
+      variant: mappedVariant,
+      fen,
+      depth,
+      multiPv,
+    });
+
+  const analyzed =
+    depth >= IMPORT_SCAN_TIMEOUT_MIN_DEPTH
+      ? await Promise.race([
+          runAnalyze(),
+          new Promise<never>((_, reject) => {
+            setTimeout(() => {
+              reject(new ImportScanTimeoutError(depth, fen, IMPORT_SCAN_TIMEOUT_MS));
+            }, IMPORT_SCAN_TIMEOUT_MS);
+          }),
+        ])
+      : await runAnalyze();
 
   return {
     bestMove: analyzed.bestMove,

@@ -1,9 +1,9 @@
 import "dotenv/config";
 import { connectMongo, disconnectMongo } from "../db/mongo";
-import { BookModel } from "../models/BookModel";
-import { syncLegacyStepsFromAuthoringBundle } from "../import/normalize/legacyImportStepToAuthoringV2";
+import { StepModel } from "../models/StepModel";
+import { LessonModel } from "../models/LessonModel";
 
-const PUZZELS_TAG = "puzzels-import";
+const PUZZELS_TAG_QUERY = "puzzels-import";
 
 function parseFlags() {
   const args = process.argv.slice(2);
@@ -31,65 +31,64 @@ async function run() {
   if (!uri) throw new Error("MONGO_URI missing");
   await connectMongo(uri);
   try {
-    const books = await BookModel.find({ isDeleted: false, tags: PUZZELS_TAG }).lean();
-    let scannedBooks = 0;
-    let changedBooks = 0;
+    // Find all steps that belong to puzzle-import books (via bookId tag join via BookModel)
+    const { BookModel } = await import("../models/BookModel");
+    const puzzleBooks = await BookModel.find(
+      { isDeleted: false, tags: PUZZELS_TAG_QUERY },
+      { bookId: 1 }
+    ).lean();
+    const puzzleBookIds = puzzleBooks
+      .map((b) => String((b as { bookId?: unknown }).bookId ?? ""))
+      .filter(Boolean);
+
+    if (puzzleBookIds.length === 0) {
+      process.stderr.write("[remove-empty-imported-puzzles] no puzzle books found\n");
+      return;
+    }
+
+    const steps = await StepModel.find({
+      isDeleted: false,
+      bookId: { $in: puzzleBookIds },
+    }).lean();
+
+    let scannedSteps = 0;
     let removedSteps = 0;
+    const stepsToRemove: string[] = [];
 
-    for (const book of books) {
-      scannedBooks += 1;
-      let bookChanged = false;
-      const nextBook = structuredClone(book) as Record<string, unknown>;
-      const lessons = Array.isArray(nextBook.lessons)
-        ? (nextBook.lessons as Record<string, unknown>[])
-        : [];
-
-      for (const lesson of lessons) {
-        const bundle = lesson.authoringV2 as
-          | {
-              authoringLesson?: { stepIds?: string[]; entryStepId?: string };
-              stepsById?: Record<string, Record<string, unknown>>;
-            }
-          | undefined;
-        if (!bundle?.authoringLesson || !bundle.stepsById) continue;
-        const stepIds = Array.isArray(bundle.authoringLesson.stepIds)
-          ? [...bundle.authoringLesson.stepIds]
-          : [];
-        if (!stepIds.length) continue;
-        const keptIds: string[] = [];
-        for (const sid of stepIds) {
-          const a = bundle.stepsById[sid];
-          if (a && isEmptyImportedPuzzleStep(a)) {
-            delete bundle.stepsById[sid];
-            removedSteps += 1;
-            bookChanged = true;
-            continue;
-          }
-          keptIds.push(sid);
-        }
-        if (keptIds.length !== stepIds.length) {
-          bundle.authoringLesson.stepIds = keptIds;
-          bundle.authoringLesson.entryStepId = keptIds[0] ?? bundle.authoringLesson.entryStepId;
-          lesson.steps = syncLegacyStepsFromAuthoringBundle(bundle as unknown as Record<string, unknown>);
-          lesson.authoringV2 = bundle;
-        }
-      }
-
-      if (bookChanged) {
-        changedBooks += 1;
-        if (write) {
-          await BookModel.updateOne({ _id: (book as { _id: unknown })._id }, { $set: nextBook });
-        }
+    for (const step of steps) {
+      scannedSteps += 1;
+      if (isEmptyImportedPuzzleStep(step as Record<string, unknown>)) {
+        const stepId = String((step as { stepId?: unknown }).stepId ?? "");
+        stepsToRemove.push(stepId);
+        removedSteps += 1;
       }
     }
 
     process.stderr.write(
       `[remove-empty-imported-puzzles] summary ${JSON.stringify({
         mode: write ? "write" : "dry-run",
-        scannedBooks,
-        changedBooks,
-        removedSteps,
+        scannedSteps,
+        emptySteps: removedSteps,
+        puzzleBooks: puzzleBookIds.length,
       })}\n`
+    );
+
+    if (!write || stepsToRemove.length === 0) return;
+
+    const now = new Date().toISOString();
+    await StepModel.updateMany(
+      { stepId: { $in: stepsToRemove } },
+      { $set: { isDeleted: true, deletedAt: now, deletedBy: "removeEmptyImportedPuzzles" } }
+    );
+
+    // Pull removed stepIds from their lessons
+    await LessonModel.updateMany(
+      { stepIds: { $in: stepsToRemove } },
+      { $pull: { stepIds: { $in: stepsToRemove } } }
+    );
+
+    process.stderr.write(
+      `[remove-empty-imported-puzzles] deleted ${stepsToRemove.length} empty steps\n`
     );
   } finally {
     await disconnectMongo();
@@ -102,4 +101,3 @@ run().catch((error) => {
   );
   process.exitCode = 1;
 });
-

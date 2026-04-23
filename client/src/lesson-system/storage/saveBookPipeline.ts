@@ -2,6 +2,7 @@ import type { Book } from "../types/lessonTypes";
 import type { AuthoringValidationResult } from "./persistedBookTypes";
 import { normalizeBookForSave } from "./normalizePersistedBook";
 import { validateBookAuthoringV2 } from "./validateAuthoringForSave";
+import { validateBookRuntimeExportReadiness } from "../utils/validateRuntimeExportReadiness";
 
 export type PrepareBookForSaveResult = {
   document: Book;
@@ -11,7 +12,17 @@ export type PrepareBookForSaveResult = {
 /** Normalize + sanitize (via `normalizeBookForSave`) then validate the persisted-shaped book. */
 export function prepareBookForPersistedSave(book: Book): PrepareBookForSaveResult {
   const document = normalizeBookForSave(book);
-  const validation = validateBookAuthoringV2(document);
+  const authoring = validateBookAuthoringV2(document);
+  const runtimeExport = validateBookRuntimeExportReadiness(document);
+  const validation: AuthoringValidationResult = {
+    errors: [...authoring.errors],
+    // Runtime export readiness remains visible, but should not block structure-first authoring saves.
+    warnings: [
+      ...authoring.warnings,
+      ...runtimeExport.warnings,
+      ...runtimeExport.errors.map((issue) => ({ ...issue, severity: "warning" as const })),
+    ],
+  };
   return { document, validation };
 }
 

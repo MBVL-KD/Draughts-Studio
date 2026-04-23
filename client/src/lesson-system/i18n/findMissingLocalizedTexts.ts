@@ -7,7 +7,20 @@ export type MissingLocalizedTextEntry = {
 };
 
 function isBlank(value: unknown): boolean {
-  return typeof value !== "string" || value.trim().length === 0;
+  if (typeof value !== "string") return true;
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) return true;
+  const placeholderValues = new Set([
+    "new book",
+    "new lesson",
+    "new step",
+    "coach text",
+    "intro",
+    "checkpoint",
+    "option a",
+    "option b",
+  ]);
+  return placeholderValues.has(normalized);
 }
 
 function toLocalizedText(value: unknown): LocalizedText | null {
@@ -44,8 +57,12 @@ export function findMissingLocalizedTexts(
   requiredLanguages: string[]
 ): MissingLocalizedTextEntry[] {
   const result: MissingLocalizedTextEntry[] = [];
+  const tags = Array.isArray(input.tags) ? input.tags : [];
+  const isPuzzelsImportBook = tags.includes("puzzels-import");
   pushIfMissing(result, "book.title", input.title, requiredLanguages);
-  pushIfMissing(result, "book.description", input.description, requiredLanguages);
+  if (!isPuzzelsImportBook) {
+    pushIfMissing(result, "book.description", input.description, requiredLanguages);
+  }
   const lessons = Array.isArray(input.lessons) ? input.lessons : [];
 
   lessons.forEach((lesson, lessonIndex) => {
@@ -61,9 +78,11 @@ export function findMissingLocalizedTexts(
     steps.forEach((step, stepIndex) => {
       const base = `lessons[${lessonIndex}].steps[${stepIndex}]`;
       pushIfMissing(result, `${base}.title`, step.title, requiredLanguages);
-      pushIfMissing(result, `${base}.prompt`, step.prompt, requiredLanguages);
-      pushIfMissing(result, `${base}.hint`, step.hint, requiredLanguages);
-      pushIfMissing(result, `${base}.explanation`, step.explanation, requiredLanguages);
+      if (!isPuzzelsImportBook) {
+        pushIfMissing(result, `${base}.prompt`, step.prompt, requiredLanguages);
+        pushIfMissing(result, `${base}.hint`, step.hint, requiredLanguages);
+        pushIfMissing(result, `${base}.explanation`, step.explanation, requiredLanguages);
+      }
       pushIfMissing(
         result,
         `${base}.feedback.correct`,
@@ -76,12 +95,14 @@ export function findMissingLocalizedTexts(
         step.feedback?.incorrect,
         requiredLanguages
       );
-      pushIfMissing(
-        result,
-        `${base}.presentation.npc.text`,
-        step.presentation?.npc?.text,
-        requiredLanguages
-      );
+      if (!isPuzzelsImportBook) {
+        pushIfMissing(
+          result,
+          `${base}.presentation.npc.text`,
+          step.presentation?.npc?.text,
+          requiredLanguages
+        );
+      }
 
       if (step.validation?.type === "multiple_choice") {
         const options = Array.isArray(step.validation.options)
@@ -97,6 +118,75 @@ export function findMissingLocalizedTexts(
         });
       }
     });
+
+    const authoring = lesson.authoringV2;
+    if (authoring && typeof authoring === "object") {
+      pushIfMissing(
+        result,
+        `${lessonBase}.authoringV2.authoringLesson.title`,
+        (authoring as { authoringLesson?: { title?: unknown } }).authoringLesson?.title,
+        requiredLanguages
+      );
+      pushIfMissing(
+        result,
+        `${lessonBase}.authoringV2.authoringLesson.description`,
+        (authoring as { authoringLesson?: { description?: unknown } }).authoringLesson?.description,
+        requiredLanguages
+      );
+
+      const stepsById =
+        (authoring as { stepsById?: unknown }).stepsById &&
+        typeof (authoring as { stepsById?: unknown }).stepsById === "object"
+          ? ((authoring as { stepsById: Record<string, unknown> }).stepsById ?? {})
+          : {};
+
+      Object.entries(stepsById).forEach(([authoringStepId, stepNode]) => {
+        const base = `${lessonBase}.authoringV2.stepsById.${authoringStepId}`;
+        pushIfMissing(
+          result,
+          `${base}.title`,
+          (stepNode as { title?: unknown })?.title,
+          requiredLanguages
+        );
+
+        const timeline = Array.isArray((stepNode as { timeline?: unknown[] })?.timeline)
+          ? (((stepNode as { timeline: unknown[] }).timeline ?? []) as unknown[])
+          : [];
+        timeline.forEach((moment, momentIndex) => {
+          const momentBase = `${base}.timeline[${momentIndex}]`;
+          pushIfMissing(
+            result,
+            `${momentBase}.title`,
+            (moment as { title?: unknown })?.title,
+            requiredLanguages
+          );
+          pushIfMissing(
+            result,
+            `${momentBase}.body`,
+            (moment as { body?: unknown })?.body,
+            requiredLanguages
+          );
+          pushIfMissing(
+            result,
+            `${momentBase}.caption`,
+            (moment as { caption?: unknown })?.caption,
+            requiredLanguages
+          );
+
+          const coaches = Array.isArray((moment as { coach?: unknown[] })?.coach)
+            ? (((moment as { coach: unknown[] }).coach ?? []) as unknown[])
+            : [];
+          coaches.forEach((coach, coachIndex) => {
+            pushIfMissing(
+              result,
+              `${momentBase}.coach[${coachIndex}].text`,
+              (coach as { text?: unknown })?.text,
+              requiredLanguages
+            );
+          });
+        });
+      });
+    }
   });
 
   return result;

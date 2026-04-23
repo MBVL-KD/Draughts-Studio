@@ -1,6 +1,8 @@
 import {
   getImportJobById,
   incrementJobProgress,
+  releaseImportJobRunLock,
+  tryAcquireImportJobRunLock,
   updateImportJobStatus,
 } from "../repositories/importJobRepository";
 import {
@@ -14,10 +16,9 @@ import {
   resetSkippedItems,
 } from "../repositories/importItemRepository";
 import type { ImportScanResult } from "../types/importTypes";
-import { getLessonAppId } from "../utils/idResolvers";
 import { appendImportedPuzzleStep } from "./puzzelsImportBooksService";
 import { getImportAdapter } from "../import/adapters";
-import { convertSlagzetItemToLessonStep } from "../import/normalize/slagzetToStep";
+import { convertSlagzetItemToAuthoringStep } from "../import/normalize/slagzetToStep";
 import { applyScanResultToImportedStep } from "../import/normalize/applyScanToImportedStep";
 import {
   ImportScanTimeoutError,
@@ -47,6 +48,9 @@ const COMBO_END_SCAN_DEPTH = 12;
  * Keep stale recovery, but avoid false positives that cause duplicate work.
  */
 const STALE_PROCESSING_REQUEUE_MS = 10 * 60_000;
+const IMPORT_JOB_RUN_LOCK_TTL_MS = 2 * 60_000;
+const APPEND_RETRY_ATTEMPTS = 4;
+const APPEND_RETRY_BASE_DELAY_MS = 120;
 
 export type ImportRunnerResult = {
   action: RunAction;
@@ -96,6 +100,15 @@ function isRecoverableScanError(error: unknown): boolean {
 
 function msSince(startMs: number): number {
   return Date.now() - startMs;
+}
+
+function isRevisionConflictLike(error: unknown): boolean {
+  const msg = buildImportFailureMessage(error).toLowerCase();
+  return msg.includes("revision conflict");
+}
+
+function waitMs(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function runOptionalImportScan(params: {
@@ -191,7 +204,22 @@ export async function runImportJobOnce(
       `[import-run] auto-skipped stale processing items job=${jobId} count=${staleReset.modifiedCount}`
     );
   }
-  const job = await getImportJobById(owner, jobId);
+  let job = await getImportJobById(owner, jobId);
+  if ((staleReset.modifiedCount ?? 0) > 0) {
+    try {
+      job = await incrementJobProgress(
+        owner,
+        jobId,
+        {
+          processedItemsInc: Number(staleReset.modifiedCount ?? 0),
+        },
+        Number(job.revision)
+      );
+    } catch (error) {
+      if (!(error instanceof ConflictError)) throw error;
+      job = await getImportJobById(owner, jobId);
+    }
+  }
   if (job.status === "paused") {
     return { action: "paused", jobId, counters: toCounterSnapshot(job), message: "Job is paused" };
   }
@@ -261,8 +289,8 @@ export async function runImportJobOnce(
     };
   }
 
+  const startedAt = Date.now();
   try {
-    const startedAt = Date.now();
     let scrapeMs = 0;
     let normalizeMs = 0;
     let fastScanMs = 0;
@@ -271,6 +299,11 @@ export async function runImportJobOnce(
     let appendMs = 0;
     let markDoneMs = 0;
     let progressMs = 0;
+    const logTiming = (outcome: string) => {
+      console.info(
+        `[import-run] timing job=${jobId} index=${pendingItem.index} outcome=${outcome} totalMs=${msSince(startedAt)} scrapeMs=${scrapeMs} normalizeMs=${normalizeMs} fastScanMs=${fastScanMs} deepScanMs=${deepScanMs} comboScanMs=${comboScanMs} appendMs=${appendMs} markDoneMs=${markDoneMs} progressMs=${progressMs}`
+      );
+    };
     console.info(
       `[import-run] start item job=${jobId} index=${pendingItem.index} itemId=${processingItem.itemId} url=${String(processingItem.fragmentUrl ?? "").slice(0, 120)}`
     );
@@ -279,11 +312,14 @@ export async function runImportJobOnce(
     const scrapedItem = await adapter.scrapeCollectionItem(processingItem.fragmentUrl);
     scrapeMs = msSince(scrapeStartedAt);
     const normalizeStartedAt = Date.now();
-    let step: Record<string, any> = convertSlagzetItemToLessonStep({
+    // Determine orderIndex: resolved lazily when appending to lesson
+    let step: Record<string, any> = convertSlagzetItemToAuthoringStep({
       job: job as any,
       item: processingItem as any,
       scrapedItem,
-    });
+      lessonId: "__pending__",
+      orderIndex: 0,
+    }) ?? (() => { throw new Error("convertSlagzetItemToAuthoringStep returned null for a valid FEN"); })();
     normalizeMs = msSince(normalizeStartedAt);
 
     const scanEnabled = Boolean(job.scanConfig?.enabled);
@@ -412,6 +448,7 @@ export async function runImportJobOnce(
         { reason: enrichedReason, scanResult },
         processingItem.revision
       );
+      const progressStartedAt = Date.now();
       const progressed = await incrementJobProgress(
         owner,
         jobId,
@@ -421,6 +458,8 @@ export async function runImportJobOnce(
         },
         job.revision
       );
+      progressMs = msSince(progressStartedAt);
+      logTiming("skip_eval_gate");
       return {
         action: "processed",
         jobId,
@@ -431,7 +470,20 @@ export async function runImportJobOnce(
     }
 
     const appendStartedAt = Date.now();
-    const appended = await appendImportedPuzzleStep(owner, job as any, step);
+    let appended: Awaited<ReturnType<typeof appendImportedPuzzleStep>> | null = null;
+    let appendErr: unknown = null;
+    for (let attempt = 1; attempt <= APPEND_RETRY_ATTEMPTS; attempt += 1) {
+      try {
+        appended = await appendImportedPuzzleStep(owner, job as any, step);
+        appendErr = null;
+        break;
+      } catch (error) {
+        appendErr = error;
+        if (!isRevisionConflictLike(error) || attempt >= APPEND_RETRY_ATTEMPTS) break;
+        await waitMs(APPEND_RETRY_BASE_DELAY_MS * attempt);
+      }
+    }
+    if (!appended) throw appendErr;
     appendMs = msSince(appendStartedAt);
     if (appended.skipped) {
       const skippedItem = await markItemSkipped(
@@ -440,6 +492,7 @@ export async function runImportJobOnce(
         { reason: appended.skipReason ?? "Skipped: no valid sequence" },
         processingItem.revision
       );
+      const progressStartedAt = Date.now();
       const progressed = await incrementJobProgress(
         owner,
         jobId,
@@ -449,6 +502,8 @@ export async function runImportJobOnce(
         },
         job.revision
       );
+      progressMs = msSince(progressStartedAt);
+      logTiming("skip_no_valid_sequence");
       return {
         action: "processed",
         jobId,
@@ -462,8 +517,8 @@ export async function runImportJobOnce(
       owner,
       processingItem.itemId,
       {
-        importedStepId: appended.importedStep.stepId,
-        importedLessonId: getLessonAppId(appended.updatedLesson),
+        importedStepId: appended.stepId,
+        importedLessonId: appended.lessonId,
         scanResult,
       },
       processingItem.revision
@@ -482,9 +537,7 @@ export async function runImportJobOnce(
       job.revision
     );
     progressMs = msSince(progressStartedAt);
-    console.info(
-      `[import-run] timing job=${jobId} index=${pendingItem.index} totalMs=${msSince(startedAt)} scrapeMs=${scrapeMs} normalizeMs=${normalizeMs} fastScanMs=${fastScanMs} deepScanMs=${deepScanMs} comboScanMs=${comboScanMs} appendMs=${appendMs} markDoneMs=${markDoneMs} progressMs=${progressMs}`
-    );
+    logTiming("done");
 
     return {
       action: "processed",
@@ -513,6 +566,9 @@ export async function runImportJobOnce(
       },
       job.revision
     );
+    console.info(
+      `[import-run] timing job=${jobId} index=${pendingItem.index} outcome=failed totalMs=${Date.now() - startedAt} message=${message}`
+    );
 
     return {
       action: "failed",
@@ -529,6 +585,25 @@ export async function runImportJobUntilStopped(
   jobId: string,
   options?: { maxItems?: number }
 ): Promise<ImportRunnerResult[]> {
+  const lockToken = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const lock = await tryAcquireImportJobRunLock(
+    owner,
+    jobId,
+    lockToken,
+    IMPORT_JOB_RUN_LOCK_TTL_MS
+  );
+  if (!lock) {
+    const current = await getImportJobById(owner, jobId);
+    return [
+      {
+        action: "processed",
+        jobId,
+        counters: toCounterSnapshot(current),
+        message: "Runner busy: another /run call is processing this job.",
+      },
+    ];
+  }
+
   const maxItems =
     typeof options?.maxItems === "number" && Number.isFinite(options.maxItems)
       ? Math.max(1, Math.floor(options.maxItems))
@@ -537,51 +612,55 @@ export async function runImportJobUntilStopped(
   let processed = 0;
   const results: ImportRunnerResult[] = [];
 
-  while (processed < maxItems) {
-    const currentJob = await getImportJobById(owner, jobId);
-    if (currentJob.status === "paused") {
-      results.push({
-        action: "paused",
-        jobId,
-        counters: toCounterSnapshot(currentJob),
-        message: "Stopped because job is paused",
-      });
-      break;
-    }
-    if (currentJob.status === "completed") {
-      results.push({
-        action: "completed",
-        jobId,
-        counters: toCounterSnapshot(currentJob),
-        message: "Stopped because job is completed",
-      });
-      break;
-    }
-    if (currentJob.status === "failed") {
-      results.push({
-        action: "failed",
-        jobId,
-        counters: toCounterSnapshot(currentJob),
-        message: "Stopped because job is failed",
-      });
-      break;
-    }
-    if (currentJob.status === "idle") {
-      await updateImportJobStatus(owner, jobId, "running", currentJob.revision);
-    }
+  try {
+    while (processed < maxItems) {
+      const currentJob = await getImportJobById(owner, jobId);
+      if (currentJob.status === "paused") {
+        results.push({
+          action: "paused",
+          jobId,
+          counters: toCounterSnapshot(currentJob),
+          message: "Stopped because job is paused",
+        });
+        break;
+      }
+      if (currentJob.status === "completed") {
+        results.push({
+          action: "completed",
+          jobId,
+          counters: toCounterSnapshot(currentJob),
+          message: "Stopped because job is completed",
+        });
+        break;
+      }
+      if (currentJob.status === "failed") {
+        results.push({
+          action: "failed",
+          jobId,
+          counters: toCounterSnapshot(currentJob),
+          message: "Stopped because job is failed",
+        });
+        break;
+      }
+      if (currentJob.status === "idle") {
+        await updateImportJobStatus(owner, jobId, "running", currentJob.revision);
+      }
 
-    const result = await runImportJobOnce(owner, jobId);
-    results.push(result);
-    processed += 1;
-    const c = result.counters;
-    const progress = c ? `${c.processedItems}/${c.totalItems}` : "?/?";
-    console.info(
-      `[import-run] result job=${jobId} action=${result.action} progress=${progress} itemId=${result.itemId ?? "-"} msg=${result.message ?? ""}`
-    );
+      const result = await runImportJobOnce(owner, jobId);
+      results.push(result);
+      processed += 1;
+      const c = result.counters;
+      const progress = c ? `${c.processedItems}/${c.totalItems}` : "?/?";
+      console.info(
+        `[import-run] result job=${jobId} action=${result.action} progress=${progress} itemId=${result.itemId ?? "-"} msg=${result.message ?? ""}`
+      );
 
-    if (result.action === "paused" || result.action === "completed" || result.action === "idle") {
-      break;
+      if (result.action === "paused" || result.action === "completed" || result.action === "idle") {
+        break;
+      }
     }
+  } finally {
+    await releaseImportJobRunLock(owner, jobId, lockToken);
   }
 
   return results;
@@ -612,9 +691,38 @@ export async function resumeImportJob(
 }
 
 export async function retryFailedImportItems(owner: OwnerContext, jobId: string) {
-  return resetFailedItems(owner, jobId);
+  const reset = await resetFailedItems(owner, jobId);
+  const changed = Number(reset.modifiedCount ?? 0);
+  if (changed <= 0) return reset;
+  let job = await getImportJobById(owner, jobId);
+  const patch = {
+    processedItemsInc: -changed,
+    failedItemsInc: -changed,
+  };
+  try {
+    await incrementJobProgress(owner, jobId, patch, Number(job.revision));
+  } catch (error) {
+    if (!(error instanceof ConflictError)) throw error;
+    job = await getImportJobById(owner, jobId);
+    await incrementJobProgress(owner, jobId, patch, Number(job.revision));
+  }
+  return reset;
 }
 
 export async function retrySkippedImportItems(owner: OwnerContext, jobId: string) {
-  return resetSkippedItems(owner, jobId);
+  const reset = await resetSkippedItems(owner, jobId);
+  const changed = Number(reset.modifiedCount ?? 0);
+  if (changed <= 0) return reset;
+  let job = await getImportJobById(owner, jobId);
+  const patch = {
+    processedItemsInc: -changed,
+  };
+  try {
+    await incrementJobProgress(owner, jobId, patch, Number(job.revision));
+  } catch (error) {
+    if (!(error instanceof ConflictError)) throw error;
+    job = await getImportJobById(owner, jobId);
+    await incrementJobProgress(owner, jobId, patch, Number(job.revision));
+  }
+  return reset;
 }

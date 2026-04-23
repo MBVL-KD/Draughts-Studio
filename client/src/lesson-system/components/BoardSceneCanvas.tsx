@@ -601,17 +601,27 @@ export default function BoardSceneCanvas({
   const isDrawingOverlayMode =
     sceneMode === "highlight" || sceneMode === "arrow" || sceneMode === "route";
 
+  /**
+   * In draw modes we still need moment overlays (semantic colors from Presentatie) visible;
+   * legacy `step.presentation` is drawn on top so board strokes stay editable.
+   */
   const displayHighlights =
-    useAuthoringMomentOverlays && !isDrawingOverlayMode
-      ? authoringPreview.highlights
+    useAuthoringMomentOverlays && authoringPreview
+      ? isDrawingOverlayMode
+        ? [...authoringPreview.highlights, ...safeHighlights]
+        : authoringPreview.highlights
       : safeHighlights;
   const displayArrows =
-    useAuthoringMomentOverlays && !isDrawingOverlayMode
-      ? authoringPreview.arrows
+    useAuthoringMomentOverlays && authoringPreview
+      ? isDrawingOverlayMode
+        ? [...authoringPreview.arrows, ...safeArrows]
+        : authoringPreview.arrows
       : safeArrows;
   const displayRoutes =
-    useAuthoringMomentOverlays && !isDrawingOverlayMode
-      ? authoringPreview.routes
+    useAuthoringMomentOverlays && authoringPreview
+      ? isDrawingOverlayMode
+        ? [...authoringPreview.routes, ...safeRoutes]
+        : authoringPreview.routes
       : safeRoutes;
 
   const effectiveRecordSlot =
@@ -2626,7 +2636,7 @@ const emptyManagerStyle: CSSProperties = {
 
 const canvasWrapStyle: CSSProperties = {
   width: "100%",
-  minHeight: "min(70vh, 780px)",
+  minHeight: 0,
   border: "none",
   background: "transparent",
   borderRadius: 0,
@@ -2639,7 +2649,9 @@ const canvasWrapStyle: CSSProperties = {
 
 const canvasInnerStyle: CSSProperties = {
   position: "relative",
-  width: "min(72vh, 56vw, 740px)",
+  width: "min(100%, calc(100dvh - 260px), 56vw, 740px)",
+  maxWidth: "100%",
+  maxHeight: "calc(100dvh - 260px)",
   aspectRatio: "1 / 1",
   lineHeight: 0,
 };

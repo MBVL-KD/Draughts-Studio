@@ -759,7 +759,7 @@ export default function StepPreviewPanel({
   const authoringPreviewEffectKey =
     authoringPreview == null
       ? ""
-      : `${authoringPreview.fen}|${authoringPreview.preferStubPresentationForOverlays}|${authoringPreview.highlights.length}|${authoringPreview.arrows.length}|${authoringPreview.routes.length}|${authoringPreview.squareGlyphs?.length ?? 0}|${authoringPreview.coachPreviewLines?.join("|") ?? ""}|${authoringPreview.uiHintPreview ?? ""}|${authoringPreview.uiBannerPreview?.text ?? ""}|${authoringPreview.timingSummary ?? ""}|${authoringPreview.runtimeDevLabels?.join("|") ?? ""}`;
+      : `${authoringPreview.fen}|${authoringPreview.preferStubPresentationForOverlays}|${authoringPreview.highlights.length}|${authoringPreview.arrows.length}|${authoringPreview.routes.length}|${authoringPreview.squareGlyphs?.length ?? 0}|${(authoringPreview.coachPreviewItems ?? []).map((item) => `${item.tone}:${item.text}`).join("|")}|${authoringPreview.uiHintPreview ?? ""}|${authoringPreview.uiBannerPreview?.text ?? ""}|${authoringPreview.timingSummary ?? ""}|${authoringPreview.runtimeDevLabels?.join("|") ?? ""}`;
 
   const interactiveMoveStep =
     step?.validation.type === "move" ||
@@ -3805,11 +3805,11 @@ const countInputStyle: CSSProperties = {
 
 const boardShellStyle: CSSProperties = {
   width: "100%",
-  minHeight: "min(62vh, 700px)",
-  border: "1px solid #dbe3ec",
-  background: "#f9fbff",
-  borderRadius: 18,
-  padding: 12,
+  minHeight: 0,
+  border: "none",
+  background: "transparent",
+  borderRadius: 0,
+  padding: 0,
   boxSizing: "border-box",
   display: "flex",
   alignItems: "flex-start",
@@ -3818,7 +3818,9 @@ const boardShellStyle: CSSProperties = {
 
 const boardInnerStyle: CSSProperties = {
   position: "relative",
-  width: "min(62vh, 52vw, 640px)",
+  width: "min(100%, calc(100dvh - 280px), 52vw, 640px)",
+  maxWidth: "100%",
+  maxHeight: "calc(100dvh - 280px)",
   aspectRatio: "1 / 1",
   lineHeight: 0,
 };

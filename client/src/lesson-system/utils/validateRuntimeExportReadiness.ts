@@ -60,6 +60,16 @@ function resolveRuntimeStartFen(step: LessonStep): string | undefined {
   return candidates.find((v) => typeof v === "string" && v.trim().length > 0)?.trim();
 }
 
+/** Slagzet / server imports: placeholder sourceRef, minimal legacy text — skip noisy export checks. */
+function isImportedSlagzetLikeStep(step: LessonStep): boolean {
+  const refId = step.sourceRef?.sourceId;
+  if (typeof refId === "string" && refId.startsWith("external:")) return true;
+  const tags = step.tags;
+  if (Array.isArray(tags) && (tags.includes("slagzet") || tags.includes("imported"))) return true;
+  const rh = step.runtimeHints as { importSourceType?: string } | undefined;
+  return rh?.importSourceType === "slagzet";
+}
+
 function validateSourceRefSemantics(
   step: LessonStep,
   basePath: string,
@@ -80,7 +90,17 @@ function validateSourceRefSemantics(
     return;
   }
 
-  if (!source?.nodes?.length) {
+  // Slagzet / import placeholders: no analysis tree in the studio — nothing to verify here.
+  if (String(ref.sourceId).startsWith("external:")) {
+    return;
+  }
+
+  // Book-level validation often runs without loading every source document; skip noisy warnings.
+  if (source === undefined) {
+    return;
+  }
+
+  if (!source.nodes?.length) {
     warnings.push({
       path: `${basePath}.sourceRef`,
       code: "runtimeExport.source_not_loaded",
@@ -119,6 +139,31 @@ export function validateLessonStepRuntimeExportReadiness(
 ): AuthoringValidationResult {
   const errors: AuthoringValidationIssue[] = [];
   const warnings: AuthoringValidationIssue[] = [];
+
+  if (isImportedSlagzetLikeStep(step)) {
+    const fen = resolveRuntimeStartFen(step);
+    const fenOptional = allowsEmptyInitialFenForRuntimeExport({ step, authoringStep });
+    if (!fen && !fenOptional) {
+      errors.push({
+        path: `${pathPrefix}.initialState`,
+        code: "runtime.start_fen.unresolved",
+        message: "Runtime start position/FEN is not resolvable",
+        severity: "error",
+      });
+    } else if (fen) {
+      try {
+        fenToBoardState(fen);
+      } catch {
+        errors.push({
+          path: `${pathPrefix}.initialState.fen`,
+          code: "fen.unparseable",
+          message: "FEN cannot be parsed for this board format",
+          severity: "error",
+        });
+      }
+    }
+    return { errors, warnings };
+  }
 
   pushRequiredLocalized(step.title, `${pathPrefix}.title`, langs, errors);
   if (requiresLocalizedFeedbackForRuntimeExport({ step, authoringStep })) {

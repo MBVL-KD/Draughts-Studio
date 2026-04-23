@@ -132,7 +132,15 @@ function wrongHintHighlights(
 
 function expectedSpecHintSquares(
   spec: ExpectedMoveSpec | undefined,
-  hintType: "from" | "to" | "from_to" | "path" | "captures" | "last_capture_leg"
+  hintType:
+    | "path_pulse_stepwise"
+    | "from"
+    | "path_numbers"
+    | "to"
+    | "from_to"
+    | "path"
+    | "captures"
+    | "last_capture_leg"
 ): number[] {
   if (!spec) return [];
   const from = Number(spec.from);
@@ -148,8 +156,12 @@ function expectedSpecHintSquares(
       ? spec.captures.filter((n) => Number.isFinite(n))
       : [];
   switch (hintType) {
+    case "path_pulse_stepwise":
+      return path;
     case "from":
       return Number.isFinite(from) ? [from] : [];
+    case "path_numbers":
+      return path;
     case "to":
       return Number.isFinite(to) ? [to] : [];
     case "from_to":
@@ -174,7 +186,16 @@ function pickHintPlanSquares(
   failedCount: number
 ): number[] | undefined {
   if (!interaction || failedCount <= 0) return undefined;
-  const plan = Array.isArray(interaction.hintPlan) ? interaction.hintPlan : [];
+  const plan =
+    Array.isArray(interaction.hintPlan) && interaction.hintPlan.length > 0
+      ? interaction.hintPlan
+      : [
+          { type: "path_pulse_stepwise" as const, afterFailedAttempts: 1 },
+          { type: "from" as const, afterFailedAttempts: 2 },
+          { type: "path_numbers" as const, afterFailedAttempts: 3 },
+          { type: "to" as const, afterFailedAttempts: 4 },
+          { type: "captures" as const, afterFailedAttempts: 5 },
+        ];
   if (plan.length === 0) return undefined;
   let picked: (typeof plan)[number] | null = null;
   for (let i = 0; i < plan.length; i += 1) {

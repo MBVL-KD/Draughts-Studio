@@ -2,289 +2,44 @@ import "dotenv/config";
 import { randomUUID } from "crypto";
 import { connectMongo, disconnectMongo } from "../db/mongo";
 import { BookModel } from "../models/BookModel";
-import { getBookAppId, getLessonAppId, getStepAppId } from "../utils/idResolvers";
-import { syncLegacyStepsFromAuthoringBundle } from "../import/normalize/legacyImportStepToAuthoringV2";
+import { LessonModel } from "../models/LessonModel";
+import { StepModel } from "../models/StepModel";
 
 const PUZZELS_TAG = "puzzels-import";
-const MAX_STEPS_PER_LESSON = 220;
-const MAX_STEPS_PER_BOOK = 900;
-const MAX_BOOK_BYTES = 1_200_000;
+const MAX_STEPS_PER_LESSON = 140;
+const MAX_STEPS_PER_BOOK = 280;
 
 type AnyRec = Record<string, unknown>;
-type BookDocLike = AnyRec & {
-  _id: unknown;
-  ownerType?: string;
-  ownerId?: string;
-  title?: AnyRec;
-  description?: AnyRec;
-  lessons?: AnyRec[];
-  tags?: string[];
-  revision?: number;
-  status?: string;
-  schemaVersion?: number;
-  archivedAt?: string | null;
-};
-
-function toFiniteSequenceIndex(value: unknown): number | null {
-  const n = Number(value);
-  return Number.isFinite(n) ? Math.trunc(n) : null;
-}
-
-function maxSequenceIndex(books: BookDocLike[]): number {
-  let max = 0;
-  for (const book of books) {
-    const seq = toFiniteSequenceIndex(book.sequenceIndex);
-    if (seq !== null && seq > max) max = seq;
-  }
-  return max;
-}
 
 function parseFlags() {
   const args = process.argv.slice(2);
   const ownerTypeArg = args.find((arg) => arg.startsWith("--ownerType="));
   const ownerIdArg = args.find((arg) => arg.startsWith("--ownerId="));
-  const ownerType = ownerTypeArg ? ownerTypeArg.slice("--ownerType=".length).trim() : "";
-  const ownerId = ownerIdArg ? ownerIdArg.slice("--ownerId=".length).trim() : "";
   return {
     write: args.includes("--write"),
-    ownerType: ownerType || undefined,
-    ownerId: ownerId || undefined,
+    ownerType: ownerTypeArg?.slice("--ownerType=".length).trim() || undefined,
+    ownerId: ownerIdArg?.slice("--ownerId=".length).trim() || undefined,
   };
-}
-
-function normalizeText(value: unknown): string {
-  return typeof value === "string" ? value.replace(/\s+/g, " ").trim() : "";
-}
-
-function lessonStepIdsFromLegacy(lesson: AnyRec): string[] {
-  const steps = Array.isArray(lesson.steps) ? (lesson.steps as AnyRec[]) : [];
-  return steps.map((s) => getStepAppId(s)).filter((id) => typeof id === "string" && id.length > 0);
 }
 
 function splitArray<T>(items: T[], size: number): T[][] {
   const chunks: T[][] = [];
-  for (let i = 0; i < items.length; i += size) {
-    chunks.push(items.slice(i, i + size));
-  }
+  for (let i = 0; i < items.length; i += size) chunks.push(items.slice(i, i + size));
   return chunks;
-}
-
-function buildPartTitle(baseLabel: string, part: number): string {
-  return part <= 1 ? baseLabel : `${baseLabel} (part ${part})`;
-}
-
-function lessonTitleLabel(lesson: AnyRec): string {
-  const values = (lesson.title as AnyRec | undefined)?.values as AnyRec | undefined;
-  return normalizeText(values?.nl ?? values?.en ?? "Collectie");
-}
-
-function cloneLessonChunk(lesson: AnyRec, stepIds: string[], part: number): AnyRec {
-  const lessonId = randomUUID();
-  const baseLabel = lessonTitleLabel(lesson).replace(/\s+\(part\s+\d+\)$/i, "");
-  const partLabel = buildPartTitle(baseLabel, part);
-  const values = {
-    en: partLabel,
-    nl: partLabel,
-  };
-
-  const bundle = lesson.authoringV2 as AnyRec | undefined;
-  const authoringLesson = (bundle?.authoringLesson as AnyRec | undefined) ?? undefined;
-  const stepsById = (bundle?.stepsById as AnyRec | undefined) ?? undefined;
-
-  if (authoringLesson && stepsById) {
-    const filteredStepsById: AnyRec = {};
-    for (const sid of stepIds) {
-      if (stepsById[sid]) filteredStepsById[sid] = stepsById[sid];
-    }
-    const nextBundle: AnyRec = {
-      ...bundle,
-      authoringLesson: {
-        ...authoringLesson,
-        id: lessonId,
-        stepIds: stepIds,
-        entryStepId: stepIds[0] ?? null,
-        title: { values },
-      },
-      stepsById: filteredStepsById,
-    };
-    const syncedSteps = syncLegacyStepsFromAuthoringBundle(nextBundle);
-    return {
-      ...lesson,
-      id: lessonId,
-      lessonId,
-      title: { values },
-      authoringV2: nextBundle,
-      steps: syncedSteps,
-    };
-  }
-
-  const legacy = Array.isArray(lesson.steps) ? (lesson.steps as AnyRec[]) : [];
-  const allowed = new Set(stepIds);
-  const steps = legacy.filter((s) => allowed.has(getStepAppId(s)));
-  return {
-    ...lesson,
-    id: lessonId,
-    lessonId,
-    title: { values },
-    steps,
-  };
-}
-
-function splitLessonIfNeeded(lesson: AnyRec): AnyRec[] {
-  const bundle = lesson.authoringV2 as AnyRec | undefined;
-  const authoringStepIds = Array.isArray((bundle?.authoringLesson as AnyRec | undefined)?.stepIds)
-    ? (((bundle!.authoringLesson as AnyRec).stepIds as unknown[]) as string[])
-    : null;
-  const stepIds = authoringStepIds ?? lessonStepIdsFromLegacy(lesson);
-  if (stepIds.length <= MAX_STEPS_PER_LESSON) {
-    return [{ ...lesson }];
-  }
-  const chunks = splitArray(stepIds, MAX_STEPS_PER_LESSON);
-  return chunks.map((chunk, index) => cloneLessonChunk(lesson, chunk, index + 1));
-}
-
-function countLessonSteps(lesson: AnyRec): number {
-  const bundle = lesson.authoringV2 as AnyRec | undefined;
-  const stepIds = (bundle?.authoringLesson as AnyRec | undefined)?.stepIds;
-  if (Array.isArray(stepIds)) return stepIds.length;
-  return Array.isArray(lesson.steps) ? lesson.steps.length : 0;
-}
-
-function estimateBookBytes(template: AnyRec, lessons: AnyRec[]): number {
-  const payload = {
-    ...template,
-    lessons,
-  };
-  return Buffer.byteLength(JSON.stringify(payload));
 }
 
 function puzzleBookTitleAtIndex(index: number): AnyRec {
   const suffix = index <= 0 ? "" : ` ${index + 1}`;
-  return {
-    values: {
-      en: `Puzzles${suffix}`,
-      nl: `Puzzels${suffix}`,
-    },
-  };
+  return { values: { en: `Puzzles${suffix}`, nl: `Puzzels${suffix}` } };
 }
 
-function buildBins(lessons: AnyRec[], template: AnyRec): AnyRec[][] {
-  const bins: AnyRec[][] = [];
-  for (const lesson of lessons) {
-    const lessonSteps = countLessonSteps(lesson);
-    let placed = false;
-    for (const bin of bins) {
-      const steps = bin.reduce((sum, l) => sum + countLessonSteps(l), 0);
-      if (steps + lessonSteps > MAX_STEPS_PER_BOOK) continue;
-      const bytes = estimateBookBytes(template, [...bin, lesson]);
-      if (bytes > MAX_BOOK_BYTES) continue;
-      bin.push(lesson);
-      placed = true;
-      break;
-    }
-    if (!placed) bins.push([lesson]);
+function maxSequenceIndex(books: AnyRec[]): number {
+  let max = 0;
+  for (const book of books) {
+    const n = Number(book.sequenceIndex);
+    if (Number.isFinite(n) && n > max) max = n;
   }
-  return bins;
-}
-
-async function processOwnerBooks(ownerBooks: BookDocLike[], write: boolean) {
-  const sorted = [...ownerBooks].sort((a, b) => {
-    const aa = String((a as AnyRec).updatedAt ?? "");
-    const bb = String((b as AnyRec).updatedAt ?? "");
-    return aa.localeCompare(bb);
-  });
-  const first = sorted[0];
-  const allLessons = sorted.flatMap((book) =>
-    Array.isArray(book.lessons) ? (book.lessons as AnyRec[]) : []
-  );
-  const splitLessons = allLessons.flatMap((lesson) => splitLessonIfNeeded(lesson));
-
-  const template: AnyRec = {
-    ownerType: first.ownerType,
-    ownerId: first.ownerId,
-    schemaVersion: 1,
-    description: first.description ?? {
-      values: {
-        en: "Imported puzzles (Slagzet).",
-        nl: "Geimporteerde puzzels (Slagzet).",
-      },
-    },
-    tags: [PUZZELS_TAG],
-    status: first.status ?? "draft",
-    exams: [],
-    unlockRules: { type: "none" },
-    accessModel: "free",
-    productId: "",
-    shopTag: "",
-  };
-
-  const bins = buildBins(splitLessons, template);
-  const baseSequence = maxSequenceIndex(sorted);
-  const ownerKey = `${first.ownerType}:${first.ownerId}`;
-  console.log(
-    `[split-puzzels] owner=${ownerKey} booksBefore=${sorted.length} lessonsBefore=${allLessons.length} lessonsAfter=${splitLessons.length} booksAfter=${bins.length} baseSequence=${baseSequence}`
-  );
-
-  if (!write) return;
-
-  for (let i = 0; i < bins.length; i += 1) {
-    const lessons = bins[i];
-    const targetExisting = sorted[i];
-    const title = puzzleBookTitleAtIndex(i);
-    const sequenceIndex = baseSequence + i + 1;
-    if (targetExisting) {
-      const revision = Number(targetExisting.revision ?? 1);
-      await BookModel.updateOne(
-        { _id: targetExisting._id },
-        {
-          $set: {
-            ...template,
-            id: getBookAppId(targetExisting as AnyRec),
-            bookId: getBookAppId(targetExisting as AnyRec),
-            title,
-            sequenceIndex,
-            lessons,
-            isDeleted: false,
-            deletedAt: null,
-            deletedBy: null,
-            revision: revision + 1,
-          },
-        }
-      );
-      continue;
-    }
-
-    const bookId = randomUUID();
-    await BookModel.create({
-      ...template,
-      id: bookId,
-      bookId,
-      title,
-      sequenceIndex,
-      lessons,
-      revision: 1,
-      isDeleted: false,
-      deletedAt: null,
-      deletedBy: null,
-    });
-  }
-
-  if (sorted.length > bins.length) {
-    const now = new Date().toISOString();
-    for (let i = bins.length; i < sorted.length; i += 1) {
-      await BookModel.updateOne(
-        { _id: sorted[i]._id },
-        {
-          $set: {
-            isDeleted: true,
-            deletedAt: now,
-            deletedBy: "splitLargePuzzelsBooks",
-            revision: Number(sorted[i].revision ?? 1) + 1,
-          },
-        }
-      );
-    }
-  }
+  return max;
 }
 
 async function run() {
@@ -293,20 +48,14 @@ async function run() {
   if (!uri) throw new Error("MONGO_URI missing");
   await connectMongo(uri);
   try {
-    const ownerFilter =
-      ownerType && ownerId
-        ? {
-            ownerType,
-            ownerId,
-          }
-        : {};
+    const ownerFilter = ownerType && ownerId ? { ownerType, ownerId } : {};
     const books = (await BookModel.find({
       ...ownerFilter,
       isDeleted: false,
       tags: { $in: [PUZZELS_TAG] },
-    }).lean()) as unknown as BookDocLike[];
+    }).lean()) as unknown as AnyRec[];
 
-    const grouped = new Map<string, BookDocLike[]>();
+    const grouped = new Map<string, AnyRec[]>();
     for (const book of books) {
       const key = `${book.ownerType}:${book.ownerId}`;
       const bucket = grouped.get(key) ?? [];
@@ -315,21 +64,166 @@ async function run() {
     }
 
     console.log(
-      `[split-puzzels] mode=${write ? "write" : "dry-run"} owners=${grouped.size} books=${books.length} ownerFilter=${ownerType ?? "*"}:${ownerId ?? "*"}`
+      `[split-puzzels] mode=${write ? "write" : "dry-run"} owners=${grouped.size} books=${books.length}`
     );
 
     for (const ownerBooks of grouped.values()) {
-      await processOwnerBooks(ownerBooks, write);
+      await processOwner(ownerBooks, write);
     }
   } finally {
     await disconnectMongo();
   }
 }
 
-run().catch((error) => {
-  console.error(
-    `[split-puzzels] fatal ${error instanceof Error ? error.message : String(error)}`
+async function processOwner(ownerBooks: AnyRec[], write: boolean) {
+  const first = ownerBooks[0];
+  const ownerCtx = { ownerType: String(first.ownerType ?? ""), ownerId: String(first.ownerId ?? "") };
+  const ownerKey = `${ownerCtx.ownerType}:${ownerCtx.ownerId}`;
+
+  // Load all lessons for these books
+  const bookIds = ownerBooks.map((b) => String(b.bookId ?? "")).filter(Boolean);
+  const lessons = (await LessonModel.find({
+    ...ownerCtx,
+    isDeleted: false,
+    bookId: { $in: bookIds },
+  }).lean()) as unknown as AnyRec[];
+
+  // Split oversized lessons
+  const splitLessons: AnyRec[] = [];
+  for (const lesson of lessons) {
+    const stepIds = Array.isArray(lesson.stepIds) ? (lesson.stepIds as string[]) : [];
+    if (stepIds.length <= MAX_STEPS_PER_LESSON) {
+      splitLessons.push(lesson);
+      continue;
+    }
+    // Lesson is too large — split into chunks
+    const chunks = splitArray(stepIds, MAX_STEPS_PER_LESSON);
+    for (let partIdx = 0; partIdx < chunks.length; partIdx++) {
+      const chunkIds = chunks[partIdx];
+      splitLessons.push({
+        ...lesson,
+        lessonId: partIdx === 0 ? String(lesson.lessonId ?? "") : randomUUID(),
+        stepIds: chunkIds,
+        entryStepId: chunkIds[0] ?? null,
+        _originalLessonId: String(lesson.lessonId ?? ""),
+        _partIdx: partIdx,
+      });
+    }
+  }
+
+  // Bin lessons into books using step count
+  const bins: AnyRec[][] = [];
+  for (const lesson of splitLessons) {
+    const lessonSteps = Array.isArray(lesson.stepIds) ? (lesson.stepIds as string[]).length : 0;
+    let placed = false;
+    for (const bin of bins) {
+      const binSteps = bin.reduce(
+        (sum, l) => sum + (Array.isArray(l.stepIds) ? (l.stepIds as string[]).length : 0),
+        0
+      );
+      if (binSteps + lessonSteps <= MAX_STEPS_PER_BOOK) {
+        bin.push(lesson);
+        placed = true;
+        break;
+      }
+    }
+    if (!placed) bins.push([lesson]);
+  }
+
+  const baseSequence = maxSequenceIndex(ownerBooks);
+  console.log(
+    `[split-puzzels] owner=${ownerKey} booksBefore=${ownerBooks.length} lessonsBefore=${lessons.length} lessonsAfter=${splitLessons.length} binsAfter=${bins.length}`
   );
+
+  if (!write) return;
+
+  const sorted = [...ownerBooks].sort((a, b) =>
+    String(a.updatedAt ?? "").localeCompare(String(b.updatedAt ?? ""))
+  );
+
+  for (let i = 0; i < bins.length; i++) {
+    const binLessons = bins[i];
+    const lessonIds = binLessons.map((l) => String(l.lessonId ?? "")).filter(Boolean);
+    const title = puzzleBookTitleAtIndex(i);
+    const sequenceIndex = baseSequence + i + 1;
+
+    const targetBook = sorted[i];
+    if (targetBook) {
+      const bookId = String(targetBook.bookId ?? "");
+      const revision = Number(targetBook.revision ?? 1);
+      await BookModel.updateOne(
+        { _id: (targetBook as { _id: unknown })._id },
+        {
+          $set: {
+            title,
+            sequenceIndex,
+            lessonIds,
+            isDeleted: false,
+            deletedAt: null,
+            deletedBy: null,
+            revision: revision + 1,
+          },
+        }
+      );
+      // Update lesson bookId references
+      for (const lesson of binLessons) {
+        const lessonId = String(lesson.lessonId ?? "");
+        if (!lessonId) continue;
+        await LessonModel.updateOne({ lessonId }, { $set: { bookId } });
+        // If this is a split-off part (new UUID), update step bookIds
+        if (lesson._partIdx && Number(lesson._partIdx) > 0) {
+          const chunkIds = Array.isArray(lesson.stepIds) ? (lesson.stepIds as string[]) : [];
+          if (chunkIds.length > 0) {
+            await StepModel.updateMany({ stepId: { $in: chunkIds } }, { $set: { bookId, lessonId } });
+          }
+        }
+      }
+    } else {
+      const bookId = randomUUID();
+      await BookModel.create({
+        ...ownerCtx,
+        id: bookId,
+        bookId,
+        title,
+        sequenceIndex,
+        lessonIds,
+        tags: [PUZZELS_TAG],
+        status: first.status ?? "draft",
+        unlockRules: { type: "none" },
+        accessModel: "free",
+        productId: "",
+        revision: 1,
+        isDeleted: false,
+        deletedAt: null,
+        deletedBy: null,
+        schemaVersion: 2,
+      });
+      for (const lesson of binLessons) {
+        const lessonId = String(lesson.lessonId ?? "");
+        if (!lessonId) continue;
+        await LessonModel.updateOne({ lessonId }, { $set: { bookId } });
+      }
+    }
+  }
+
+  // Soft-delete excess books
+  const now = new Date().toISOString();
+  for (let i = bins.length; i < sorted.length; i++) {
+    await BookModel.updateOne(
+      { _id: (sorted[i] as { _id: unknown })._id },
+      {
+        $set: {
+          isDeleted: true,
+          deletedAt: now,
+          deletedBy: "splitLargePuzzelsBooks",
+          revision: Number(sorted[i].revision ?? 1) + 1,
+        },
+      }
+    );
+  }
+}
+
+run().catch((error) => {
+  console.error(`[split-puzzels] fatal ${error instanceof Error ? error.message : String(error)}`);
   process.exitCode = 1;
 });
-

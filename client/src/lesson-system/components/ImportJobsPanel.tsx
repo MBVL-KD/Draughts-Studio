@@ -377,12 +377,13 @@ export default function ImportJobsPanel({ language }: Props) {
         const raw = await apiPost<ImportRunResponse>(`/api/import-jobs/${jobId}/run`, {
           maxItems: runBatchCount,
         });
-        if (raw.batchSteps?.length) {
+        const batchSteps = raw.batchSteps;
+        if (batchSteps?.length) {
           appendRunLogLines(
-            raw.batchSteps.map((s, i) => {
+            batchSteps.map((s, i) => {
               const c = s.counters;
               const prog = c ? `${c.processedItems}/${c.totalItems}` : "";
-              return `  [${i + 1}/${raw.batchSteps.length}] ${s.action} ${prog} ${s.message ?? ""}`.trim();
+              return `  [${i + 1}/${batchSteps.length}] ${s.action} ${prog} ${s.message ?? ""}`.trim();
             })
           );
         } else {

@@ -1,6 +1,7 @@
 import type { AuthoringLessonStep } from "../types/authoring/lessonStepTypes";
 import type {
   CameraAction,
+  CoachTone,
   FxAction,
 } from "../types/authoring/presentationRuntimeTypes";
 import type {
@@ -31,8 +32,8 @@ export type AuthoringPreviewResolved = {
   routes: RouteSpec[];
   /** Optional square-anchored glyph badges from `moment.glyphMarkers`. */
   squareGlyphs?: AuthoringSquareGlyph[];
-  /** Bundel 8b: coach lines for lightweight studio/preview strip (not executed as NPC). */
-  coachPreviewLines?: string[];
+  /** Bundel 8b: coach preview items (text + semantic tone). */
+  coachPreviewItems?: { text: string; tone: CoachTone }[];
   /** First / merged hint text from `ui.showHint`. */
   uiHintPreview?: string;
   /** Banner text + style from `ui.showBanner` (last banner wins for style if multiple). */
@@ -182,13 +183,16 @@ function resolveSquareGlyphs(
   return out;
 }
 
-function coachPreviewLinesFromMoment(
+function coachPreviewItemsFromMoment(
   moment: StepMoment,
   language: LanguageCode
-): string[] {
+): { text: string; tone: CoachTone }[] {
   return (moment.coach ?? [])
-    .map((c) => readLocalizedText(c.text, language).trim())
-    .filter(Boolean);
+    .map((c) => ({
+      text: readLocalizedText(c.text, language).trim(),
+      tone: c.tone ?? "neutral",
+    }))
+    .filter((entry) => !!entry.text);
 }
 
 function uiPreviewFromMoment(
@@ -319,7 +323,7 @@ export function resolveAuthoringPreviewState(
       arrows: [],
       routes: [],
       squareGlyphs: undefined,
-      coachPreviewLines: undefined,
+      coachPreviewItems: undefined,
       uiHintPreview: undefined,
       uiBannerPreview: undefined,
       timingSummary: undefined,
@@ -339,7 +343,7 @@ export function resolveAuthoringPreviewState(
   const hasGlyphs = squareGlyphs.length > 0;
   const useAuthoringPresentationLayer = hasMomentOverlays || hasGlyphs;
 
-  const coachPreviewLines = coachPreviewLinesFromMoment(moment, language);
+  const coachPreviewItems = coachPreviewItemsFromMoment(moment, language);
   const { uiHintPreview, uiBannerPreview } = uiPreviewFromMoment(moment, language);
   const timingSummary = timingSummaryFromMoment(moment);
   const runtimeDevLabels = runtimeDevLabelsFromMoment(moment);
@@ -351,7 +355,7 @@ export function resolveAuthoringPreviewState(
     arrows: converted.arrows,
     routes: converted.routes,
     squareGlyphs: hasGlyphs ? squareGlyphs : undefined,
-    coachPreviewLines: coachPreviewLines.length ? coachPreviewLines : undefined,
+    coachPreviewItems: coachPreviewItems.length ? coachPreviewItems : undefined,
     uiHintPreview,
     uiBannerPreview,
     timingSummary,

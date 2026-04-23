@@ -36,6 +36,8 @@ const ImportJobSchema = new Schema(
       depth: { type: Number },
       multiPv: { type: Number },
     },
+    runLockToken: { type: String, default: null },
+    runLockUntil: { type: Date, default: null },
     lastError: { type: String, default: null },
     isDeleted: { type: Boolean, default: false },
     deletedAt: { type: String, default: null },

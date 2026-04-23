@@ -1,8 +1,7 @@
 import "dotenv/config";
 import { connectMongo, disconnectMongo } from "../db/mongo";
-import { BookModel } from "../models/BookModel";
+import { StepModel } from "../models/StepModel";
 import { resolveNotationLineToStructuredMovesDetailed } from "../playback/resolveNotationLineToStructuredMoves";
-import { getStepAppId } from "../utils/idResolvers";
 
 type AuthoringExpectedMoveLike = {
   from?: number;
@@ -13,8 +12,7 @@ type AuthoringExpectedMoveLike = {
 
 function parseFlags() {
   const args = process.argv.slice(2);
-  const write = args.includes("--write");
-  return { write };
+  return { write: args.includes("--write") };
 }
 
 function toNotationFromExpected(spec: AuthoringExpectedMoveLike): string {
@@ -34,12 +32,7 @@ function toRuntimeExpected(m: {
   path: number[];
   captures: number[];
 }): AuthoringExpectedMoveLike {
-  return {
-    from: m.from,
-    to: m.to,
-    path: m.path,
-    captures: m.captures,
-  };
+  return { from: m.from, to: m.to, path: m.path, captures: m.captures };
 }
 
 async function run() {
@@ -49,105 +42,76 @@ async function run() {
 
   await connectMongo(uri);
   try {
-    const books = await BookModel.find({ isDeleted: false }).lean();
-    let scannedBooks = 0;
-    let changedBooks = 0;
+    const steps = await StepModel.find({ isDeleted: false }).lean();
+    let scannedSteps = 0;
+    let changedSteps = 0;
     let repairedMoments = 0;
     let unresolvedMoments = 0;
 
-    for (const book of books) {
-      scannedBooks += 1;
-      let bookChanged = false;
-      const nextBook = structuredClone(book) as Record<string, unknown>;
-      const lessons = Array.isArray(nextBook.lessons) ? (nextBook.lessons as Record<string, unknown>[]) : [];
+    for (const rawStep of steps) {
+      scannedSteps += 1;
+      const step = rawStep as Record<string, unknown>;
+      const timeline = Array.isArray(step.timeline)
+        ? (step.timeline as Record<string, unknown>[])
+        : [];
+      const startFen = String(
+        (step.initialState as Record<string, unknown> | undefined)?.fen ?? ""
+      ).trim();
+      if (!startFen) continue;
 
-      for (const lesson of lessons) {
-        const authoring = lesson.authoringV2 as
-          | {
-              stepsById?: Record<string, { initialState?: { fen?: string }; timeline?: unknown[] }>;
-              authoringLesson?: { stepIds?: string[] };
-            }
-          | undefined;
-        if (!authoring?.stepsById) continue;
-        const stepIds = Array.isArray(authoring.authoringLesson?.stepIds)
-          ? authoring.authoringLesson!.stepIds!
-          : Object.keys(authoring.stepsById);
-
-        for (const stepId of stepIds) {
-          const aStep = authoring.stepsById[stepId];
-          if (!aStep?.timeline || !Array.isArray(aStep.timeline)) continue;
-          const startFen = String(aStep.initialState?.fen ?? "").trim();
-          if (!startFen) continue;
-
-          for (let i = 0; i < aStep.timeline.length; i += 1) {
-            const moment = aStep.timeline[i] as
-              | {
-                  type?: string;
-                  interaction?: { kind?: string; expectedSequence?: AuthoringExpectedMoveLike[] };
-                }
-              | undefined;
-            if (
-              !moment ||
-              moment.type !== "askSequence" ||
-              moment.interaction?.kind !== "askSequence" ||
-              !Array.isArray(moment.interaction.expectedSequence) ||
-              moment.interaction.expectedSequence.length === 0
-            ) {
-              continue;
-            }
-
-            const notations = moment.interaction.expectedSequence
-              .map((s) => toNotationFromExpected(s))
-              .filter(Boolean);
-            if (!notations.length) continue;
-
-            const resolved = resolveNotationLineToStructuredMovesDetailed(startFen, notations);
-            if (!resolved.ok || resolved.moves.length !== notations.length) {
-              unresolvedMoments += 1;
-              continue;
-            }
-
-            const nextExpected = resolved.moves.map((m) => toRuntimeExpected(m));
-            const prevJson = JSON.stringify(moment.interaction.expectedSequence);
-            const nextJson = JSON.stringify(nextExpected);
-            if (prevJson === nextJson) continue;
-
-            moment.interaction.expectedSequence = nextExpected;
-            repairedMoments += 1;
-            bookChanged = true;
-
-            // Keep legacy step validation notations aligned if present.
-            const legacyLessons = Array.isArray(nextBook.lessons)
-              ? (nextBook.lessons as Record<string, unknown>[])
-              : [];
-            for (const ll of legacyLessons) {
-              const legacySteps = Array.isArray(ll.steps) ? (ll.steps as Record<string, unknown>[]) : [];
-              const legacy = legacySteps.find((s) => getStepAppId(s as { id?: string; stepId?: string }) === stepId);
-              if (!legacy) continue;
-              const validation = (legacy.validation ?? {}) as Record<string, unknown>;
-              if (validation.type === "sequence") {
-                validation.moves = resolved.moves.map((m) => m.notation);
-                legacy.validation = validation;
-              }
-            }
-          }
+      let stepChanged = false;
+      const nextTimeline = timeline.map((moment) => {
+        if (
+          !moment ||
+          moment.type !== "askSequence" ||
+          (moment.interaction as Record<string, unknown> | undefined)?.kind !== "askSequence" ||
+          !Array.isArray(
+            (moment.interaction as Record<string, unknown> | undefined)?.expectedSequence
+          ) ||
+          (
+            (moment.interaction as Record<string, unknown>).expectedSequence as unknown[]
+          ).length === 0
+        ) {
+          return moment;
         }
-      }
 
-      if (bookChanged) {
-        changedBooks += 1;
+        const interaction = moment.interaction as Record<string, unknown>;
+        const expected = interaction.expectedSequence as AuthoringExpectedMoveLike[];
+        const notations = expected.map((s) => toNotationFromExpected(s)).filter(Boolean);
+        if (!notations.length) return moment;
+
+        const resolved = resolveNotationLineToStructuredMovesDetailed(startFen, notations);
+        if (!resolved.ok || resolved.moves.length !== notations.length) {
+          unresolvedMoments += 1;
+          return moment;
+        }
+
+        const nextExpected = resolved.moves.map((m) => toRuntimeExpected(m));
+        if (JSON.stringify(expected) === JSON.stringify(nextExpected)) return moment;
+
+        repairedMoments += 1;
+        stepChanged = true;
+        return {
+          ...moment,
+          interaction: { ...interaction, expectedSequence: nextExpected },
+        };
+      });
+
+      if (stepChanged) {
+        changedSteps += 1;
         if (write) {
-          const payload = { ...nextBook } as Record<string, unknown>;
-          delete payload._id;
-          await BookModel.updateOne({ _id: (book as { _id: unknown })._id }, { $set: payload });
+          await StepModel.updateOne(
+            { _id: (rawStep as { _id: unknown })._id },
+            { $set: { timeline: nextTimeline } }
+          );
         }
       }
     }
 
     console.log("[repair-imported-puzzles] summary", {
       mode: write ? "write" : "dry-run",
-      scannedBooks,
-      changedBooks,
+      scannedSteps,
+      changedSteps,
       repairedMoments,
       unresolvedMoments,
     });
@@ -162,4 +126,3 @@ run().catch((error) => {
   );
   process.exitCode = 1;
 });
-

@@ -1,202 +1,81 @@
-import { parsePlaybackPayloadShape } from "../validation/playbackSchemas";
-import { ValidationError } from "../utils/httpErrors";
-import { buildPlaybackHintPayload } from "../playback/buildPlaybackHint";
 import { buildAuthoringTimelinePlaybackBlock } from "../playback/buildAuthoringTimelineForPlayback";
-import { buildRuntimeValidationBlockWithAuthoring } from "../playback/buildRuntimeValidation";
+import { buildRuntimeValidationFromV2Step } from "../playback/buildRuntimeValidation";
+import { buildPlaybackHintFromV2Step } from "../playback/buildPlaybackHint";
 
-type LocalizedTextLike = {
-  values?: Record<string, string>;
-};
-
-type SourceNodeSnapshotLike = {
-  nodeId?: string;
-  plyIndex?: number;
-  notation?: string;
-  fenAfter?: string;
-  glyphs?: string[];
-  preMoveComment?: LocalizedTextLike;
-  comment?: LocalizedTextLike;
-};
+type LocalizedTextLike = { values?: Record<string, string> };
 
 export type PlaybackNavigationMeta = {
   bookId: string;
   lessonId: string;
   stepId: string;
-  /** 0-based index in the lesson `steps` array (book order). */
   stepIndex: number;
   totalSteps: number;
   previousStepId: string | null;
   nextStepId: string | null;
 };
 
-type StepLike = {
-  id?: string;
-  stepId?: string;
-  type?: string;
-  title?: LocalizedTextLike;
-  prompt?: LocalizedTextLike;
-  hint?: LocalizedTextLike;
-  initialState?: {
-    fen?: string;
-    sideToMove?: "white" | "black";
-    startFen?: string;
-    boardFen?: string;
-    snapshotFen?: string;
-  };
-  validation?: Record<string, unknown>;
-  puzzleMeta?: unknown;
-  runtimeHints?: Record<string, string | number | boolean | null>;
-  sourceRef?: {
-    sourceId?: string;
-    startNodeId?: string | null;
-    endNodeId?: string | null;
-    lineMode?: "mainline" | "variation" | "custom";
-    nodeTimeline?: SourceNodeSnapshotLike[];
-  };
-  presentation?: {
-    autoplay?: {
-      moves?: string[];
-    };
-    highlights?: unknown[];
-    arrows?: unknown[];
-    routes?: unknown[];
-  };
-};
-
-function readLocalizedText(value: LocalizedTextLike | undefined, language: string): string {
+function readLocalizedText(value: LocalizedTextLike | undefined | null, language: string): string {
   if (!value?.values) return "";
   return value.values[language] ?? value.values.en ?? "";
 }
 
-function resolveInitialFen(step: StepLike): string {
-  const raw =
-    step.initialState?.fen ??
-    step.initialState?.startFen ??
-    step.initialState?.boardFen ??
-    step.initialState?.snapshotFen ??
-    "";
-  return String(raw).trim();
-}
-
+/**
+ * Builds a runtime playback payload from a v2 AuthoringLessonStep.
+ * No legacy v1 step involved — timeline is the single source of truth.
+ */
 export function buildPlaybackPayload(params: {
-  step: StepLike;
+  step: Record<string, unknown>;
+  orderedStepIds: string[];
   language?: string;
-  /** From parent lesson; used by runtime (Scan variant mapping). */
   variantId?: string;
-  lessonId?: string;
-  /** Optional authoring step context for v2-derived runtime fallback. */
-  authoringStep?: unknown;
-  /** Lesson position in book order; omit for callers without lesson context. */
-  navigation?: PlaybackNavigationMeta;
+  lessonId: string;
+  bookId: string;
 }) {
-  const step = params.step;
+  const { step, orderedStepIds, lessonId, bookId } = params;
   const language = params.language ?? "en";
-  const variantId =
-    typeof params.variantId === "string" && params.variantId.trim()
-      ? params.variantId.trim()
-      : "international";
-  const timeline = step.sourceRef?.nodeTimeline ?? [];
 
-  const nodes = timeline
-    .map((item, index) => ({
-      id: item.nodeId ?? `node-${index + 1}`,
-      ply: item.plyIndex ?? index + 1,
-      notation: item.notation,
-      fenAfter: item.fenAfter,
-      parentId: index > 0 ? (timeline[index - 1]?.nodeId ?? `node-${index}`) : null,
-      childrenIds:
-        index < timeline.length - 1
-          ? [timeline[index + 1]?.nodeId ?? `node-${index + 2}`]
-          : [],
-    }))
-    .sort((a, b) => a.ply - b.ply);
-
-  const events = timeline
-    .flatMap((item) => {
-      const ply = item.plyIndex ?? 0;
-      const parts = [];
-      const pre = readLocalizedText(item.preMoveComment, language).trim();
-      if (pre) {
-        parts.push({
-          type: "pre_comment" as const,
-          ply,
-          text: pre,
-        });
-      }
-      if (item.glyphs && item.glyphs.length > 0) {
-        parts.push({
-          type: "glyphs" as const,
-          ply,
-          glyphs: item.glyphs,
-        });
-      }
-      const post = readLocalizedText(item.comment, language).trim();
-      if (post) {
-        parts.push({
-          type: "post_comment" as const,
-          ply,
-          text: post,
-        });
-      }
-      return parts;
-    })
-    .sort((a, b) => a.ply - b.ply);
-
-  events.push({
-    type: "overlay",
-    ply: 0,
-    highlights: step.presentation?.highlights ?? [],
-    arrows: step.presentation?.arrows ?? [],
-    routes: step.presentation?.routes ?? [],
-  });
-
-  const { validation: runtimeValidation, puzzleScan } = buildRuntimeValidationBlockWithAuthoring(
-    step,
-    params.authoringStep as Parameters<typeof buildRuntimeValidationBlockWithAuthoring>[1]
+  const stepId = String(step.stepId ?? step.id ?? "");
+  const initialState = step.initialState as Record<string, unknown> | undefined;
+  const initialFen = String(initialState?.fen ?? "").trim();
+  const sideToMove = initialState?.sideToMove === "black" ? "black" : "white";
+  const variantId = String(
+    (initialState?.variantId as string | undefined) ?? params.variantId ?? "international"
   );
-  const hintPayload = buildPlaybackHintPayload(step, language);
-  const authoringPlayback = buildAuthoringTimelinePlaybackBlock(params.authoringStep, language);
 
-  const payload = {
-    payloadType: "lesson-step-playback" as const,
-    payloadVersion: 2 as const,
-    stepId: step.stepId ?? step.id ?? "",
-    lessonId: params.lessonId,
-    stepType: step.type ?? "",
-    title: readLocalizedText(step.title, language),
-    prompt: readLocalizedText(step.prompt, language),
-    initialFen: resolveInitialFen(step),
-    sideToMove: step.initialState?.sideToMove ?? "white",
-    variantId,
-    lineMode: step.sourceRef?.lineMode ?? "custom",
-    sourceId: step.sourceRef?.sourceId,
-    startNodeId: step.sourceRef?.startNodeId ?? null,
-    endNodeId: step.sourceRef?.endNodeId ?? null,
-    nodes,
-    autoplayMoves: (step.presentation?.autoplay?.moves ?? []).filter(
-      (value): value is string => typeof value === "string" && value.trim().length > 0
-    ),
-    events,
-    validation: runtimeValidation,
-    puzzleScan,
-    ...(params.navigation ? { navigation: params.navigation } : {}),
-    ...(params.navigation
-      ? {
-          stepIndex: params.navigation.stepIndex,
-          totalSteps: params.navigation.totalSteps,
-          previousStepId: params.navigation.previousStepId,
-          nextStepId: params.navigation.nextStepId,
-        }
-      : {}),
-    ...(hintPayload ? { hint: hintPayload } : {}),
-    ...(authoringPlayback ? authoringPlayback : {}),
+  const idx = orderedStepIds.findIndex((id) => id === stepId);
+  const navigation: PlaybackNavigationMeta = {
+    bookId,
+    lessonId,
+    stepId,
+    stepIndex: idx >= 0 ? idx : 0,
+    totalSteps: orderedStepIds.length,
+    previousStepId: idx > 0 ? (orderedStepIds[idx - 1] ?? null) : null,
+    nextStepId:
+      idx >= 0 && idx < orderedStepIds.length - 1 ? (orderedStepIds[idx + 1] ?? null) : null,
   };
 
-  const parsed = parsePlaybackPayloadShape(payload);
-  if (!parsed.result.ok || !parsed.parsed) {
-    throw new ValidationError("Playback payload validation failed", parsed.result.issues);
-  }
+  const { validation, puzzleScan } = buildRuntimeValidationFromV2Step(step, language);
+  const authoringPlayback = buildAuthoringTimelinePlaybackBlock(step, language);
+  const hint = buildPlaybackHintFromV2Step(step, language);
 
-  return parsed.parsed;
+  return {
+    payloadType: "lesson-step-playback" as const,
+    payloadVersion: 2 as const,
+    stepId,
+    lessonId,
+    stepKind: String(step.kind ?? ""),
+    title: readLocalizedText(step.title as LocalizedTextLike | undefined, language),
+    initialFen,
+    sideToMove,
+    variantId,
+    validation,
+    puzzleScan,
+    navigation,
+    stepIndex: navigation.stepIndex,
+    totalSteps: navigation.totalSteps,
+    previousStepId: navigation.previousStepId,
+    nextStepId: navigation.nextStepId,
+    ...(authoringPlayback ?? {}),
+    ...(hint ? { hint } : {}),
+  };
 }
-

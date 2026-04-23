@@ -72,8 +72,53 @@ export function buildRuntimeValidationBlock(step: StepLike): {
   validation: RuntimeValidationBlock;
   puzzleScan?: PuzzleScanPlaybackMeta;
 } {
-  const initialFen = resolveInitialFen(step);
   return buildRuntimeValidationBlockWithAuthoring(step);
+}
+
+/**
+ * V2-native entry point: the step IS the authoring step.
+ * Reads expectedSequence from the askSequence moment in timeline.
+ */
+export function buildRuntimeValidationFromV2Step(
+  step: Record<string, unknown>,
+  _language: string
+): {
+  validation: RuntimeValidationBlock;
+  puzzleScan?: PuzzleScanPlaybackMeta;
+} {
+  const initialFen = String(
+    (step.initialState as Record<string, unknown> | undefined)?.fen ?? ""
+  ).trim();
+  const sideToMove =
+    (step.initialState as Record<string, unknown> | undefined)?.sideToMove === "black"
+      ? "black"
+      : "white";
+
+  const puzzleSide = sideToMove;
+  const strictAuthoredOnly = false;
+  const scanFallbackEnabled = !!(step.puzzleMeta);
+  const baseline = buildBaselineFromStep(
+    { runtimeHints: step.runtimeHints as Record<string, string | number | boolean | null> },
+    puzzleSide
+  );
+  const puzzleScan: PuzzleScanPlaybackMeta = {
+    scanFallbackEnabled,
+    strictAuthoredOnly,
+    puzzleSide,
+    baseline,
+    policy: {
+      evalTolerance: PUZZLE_PLAYBACK_CONFIG.evalTolerance,
+      winningThreshold: PUZZLE_PLAYBACK_CONFIG.winningThreshold,
+      equalBandMax: PUZZLE_PLAYBACK_CONFIG.equalBandMax,
+      scanDepth: PUZZLE_PLAYBACK_CONFIG.scanDepth,
+      multiPv: PUZZLE_PLAYBACK_CONFIG.multiPv,
+    },
+    debug: [`scan_fallback_enabled=${scanFallbackEnabled}`, `step_kind=${String(step.kind ?? "")}`],
+  };
+
+  const fallback = buildAuthoringAskSequenceFallback(initialFen, {}, step as AuthoringStepLike);
+  if (fallback) return { validation: fallback, puzzleScan };
+  return { validation: { runtimeKind: "none", acceptMode: "exact" }, puzzleScan };
 }
 
 export function buildRuntimeValidationBlockWithAuthoring(

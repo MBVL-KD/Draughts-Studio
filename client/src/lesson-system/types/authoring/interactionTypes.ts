@@ -48,7 +48,15 @@ export type AskSequenceInteraction = {
   wrongHintHighlightSquares?: number[];
   /** Ordered visual hint plan; later entries can reveal more concrete hints. */
   hintPlan?: Array<{
-    type: "from" | "to" | "from_to" | "path" | "captures" | "last_capture_leg";
+    type:
+      | "path_pulse_stepwise"
+      | "from"
+      | "path_numbers"
+      | "to"
+      | "captures"
+      | "from_to"
+      | "path"
+      | "last_capture_leg";
     /** Reveal this hint from Nth failed attempt (1-based). Defaults to list position. */
     afterFailedAttempts?: number;
   }>;

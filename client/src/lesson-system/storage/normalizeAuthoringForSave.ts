@@ -20,7 +20,9 @@ function normalizeInteractionSquares(ix: InteractionSpec): InteractionSpec {
       };
     case "askSequence":
       const allowedHintTypes = new Set([
+        "path_pulse_stepwise",
         "from",
+        "path_numbers",
         "to",
         "from_to",
         "path",

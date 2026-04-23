@@ -243,3 +243,56 @@ export async function softDeleteImportJob(
   if (!updated) throw new NotFoundError("Import job not found");
   return updated;
 }
+
+export async function tryAcquireImportJobRunLock(
+  owner: OwnerContext,
+  jobId: string,
+  token: string,
+  ttlMs: number
+) {
+  const now = new Date();
+  const lockUntil = new Date(now.getTime() + Math.max(5_000, Math.floor(ttlMs)));
+  const updated = await ImportJobModel.findOneAndUpdate(
+    {
+      ...withOwnerFilter(owner),
+      jobId,
+      $or: [
+        { runLockUntil: null },
+        { runLockUntil: { $lte: now } },
+        { runLockToken: token },
+      ],
+    },
+    {
+      $set: {
+        runLockToken: token,
+        runLockUntil: lockUntil,
+        updatedAt: now,
+      },
+      $inc: { revision: 1 },
+    },
+    { returnDocument: "after" }
+  ).lean();
+  return updated;
+}
+
+export async function releaseImportJobRunLock(
+  owner: OwnerContext,
+  jobId: string,
+  token: string
+) {
+  await ImportJobModel.updateOne(
+    {
+      ...withOwnerFilter(owner),
+      jobId,
+      runLockToken: token,
+    },
+    {
+      $set: {
+        runLockToken: null,
+        runLockUntil: null,
+        updatedAt: new Date(),
+      },
+      $inc: { revision: 1 },
+    }
+  );
+}

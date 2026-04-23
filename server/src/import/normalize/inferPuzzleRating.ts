@@ -45,6 +45,12 @@ function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
 }
 
+function beginnerSeedByCombinationPlyCount(moveCount: number): number {
+  if (moveCount <= 2) return 800;
+  if (moveCount <= 4) return 900;
+  return 1000;
+}
+
 function parsePvMoves(scanResult?: ImportScanResult | null): string[] {
   if (!scanResult || !Array.isArray(scanResult.pv)) return [];
   return scanResult.pv
@@ -112,18 +118,19 @@ export function inferPuzzleDifficultyBand(input: InferInput): DifficultyBand {
 
 export function inferPuzzleRating(input: InferInput): number {
   const band = inferPuzzleDifficultyBand(input);
+  const moveCountRaw = Number(input.combinationMoveCount ?? 0);
+  const moveCount = Number.isFinite(moveCountRaw) ? Math.max(0, Math.floor(moveCountRaw)) : 0;
+  if (band === "beginner") {
+    return beginnerSeedByCombinationPlyCount(moveCount);
+  }
   const defaultBase =
-    band === "beginner"
-      ? BEGINNER_BASE_RATING
-      : band === "advanced"
+    band === "advanced"
       ? ADVANCED_BASE_RATING
       : INTERMEDIATE_BASE_RATING;
   const base =
     typeof input.basePuzzleRating === "number" && Number.isFinite(input.basePuzzleRating)
       ? clamp(Math.round(input.basePuzzleRating), MIN_PUZZLE_RATING, MAX_PUZZLE_RATING)
       : defaultBase;
-
-  const moveCount = Number(input.combinationMoveCount ?? 0);
   const hasScan = !!input.scanResult;
   if (!hasScan) return clamp(base, MIN_PUZZLE_RATING, MAX_PUZZLE_RATING);
 
@@ -211,10 +218,8 @@ export function mergePuzzleMeta(
   ]);
 
   return {
-    puzzleRating:
-      typeof maybe.puzzleRating === "number" && Number.isFinite(maybe.puzzleRating)
-        ? Math.round(maybe.puzzleRating)
-        : inferred.puzzleRating,
+    // For non-manual ratings, always refresh from inferred heuristics/scan.
+    puzzleRating: inferred.puzzleRating,
     difficultyBand: isDifficultyBand(maybe.difficultyBand)
       ? maybe.difficultyBand
       : inferred.difficultyBand,
