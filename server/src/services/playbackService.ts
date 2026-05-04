@@ -12,6 +12,11 @@ export type PlaybackNavigationMeta = {
   totalSteps: number;
   previousStepId: string | null;
   nextStepId: string | null;
+  lessonIndex: number;
+  totalLessons: number;
+  nextLessonId: string | null;
+  nextLessonEntryStepId: string | null;
+  isBookComplete: boolean;
 };
 
 function readLocalizedText(value: LocalizedTextLike | undefined | null, language: string): string {
@@ -30,6 +35,11 @@ export function buildPlaybackPayload(params: {
   variantId?: string;
   lessonId: string;
   bookId: string;
+  lessonIndex?: number;
+  totalLessons?: number;
+  nextLessonId?: string | null;
+  nextLessonEntryStepId?: string | null;
+  isBookComplete?: boolean;
 }) {
   const { step, orderedStepIds, lessonId, bookId } = params;
   const language = params.language ?? "en";
@@ -43,6 +53,9 @@ export function buildPlaybackPayload(params: {
   );
 
   const idx = orderedStepIds.findIndex((id) => id === stepId);
+  const nextStepId =
+    idx >= 0 && idx < orderedStepIds.length - 1 ? (orderedStepIds[idx + 1] ?? null) : null;
+
   const navigation: PlaybackNavigationMeta = {
     bookId,
     lessonId,
@@ -50,8 +63,12 @@ export function buildPlaybackPayload(params: {
     stepIndex: idx >= 0 ? idx : 0,
     totalSteps: orderedStepIds.length,
     previousStepId: idx > 0 ? (orderedStepIds[idx - 1] ?? null) : null,
-    nextStepId:
-      idx >= 0 && idx < orderedStepIds.length - 1 ? (orderedStepIds[idx + 1] ?? null) : null,
+    nextStepId,
+    lessonIndex: params.lessonIndex ?? 0,
+    totalLessons: params.totalLessons ?? 1,
+    nextLessonId: nextStepId !== null ? null : (params.nextLessonId ?? null),
+    nextLessonEntryStepId: nextStepId !== null ? null : (params.nextLessonEntryStepId ?? null),
+    isBookComplete: params.isBookComplete ?? false,
   };
 
   const { validation, puzzleScan } = buildRuntimeValidationFromV2Step(step, language);

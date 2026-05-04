@@ -120,6 +120,54 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   );
 }
 
+type LessonNav = {
+  lessonIndex: number;
+  totalLessons: number;
+  nextLessonId: string | null;
+  nextLessonEntryStepId: string | null;
+  isBookComplete: boolean;
+};
+
+async function resolveLessonNav(
+  contentOwner: OwnerContext,
+  book: unknown,
+  stepLessonId: string,
+  stepId: string,
+  orderedStepIds: string[],
+): Promise<LessonNav> {
+  const bookLessonIds = Array.isArray((book as { lessonIds?: unknown } | null)?.lessonIds)
+    ? ((book as { lessonIds: unknown[] }).lessonIds as string[]).filter(
+        (id): id is string => typeof id === "string" && id.length > 0,
+      )
+    : [];
+
+  const lessonIndex = Math.max(0, bookLessonIds.indexOf(stepLessonId));
+  const totalLessons = bookLessonIds.length || 1;
+  const isLastStep =
+    orderedStepIds.length > 0 && orderedStepIds[orderedStepIds.length - 1] === stepId;
+  const isLastLesson = lessonIndex >= bookLessonIds.length - 1;
+
+  if (!isLastStep) {
+    return { lessonIndex, totalLessons, nextLessonId: null, nextLessonEntryStepId: null, isBookComplete: false };
+  }
+  if (isLastLesson) {
+    return { lessonIndex, totalLessons, nextLessonId: null, nextLessonEntryStepId: null, isBookComplete: true };
+  }
+
+  const nextLessonId = bookLessonIds[lessonIndex + 1] ?? null;
+  if (!nextLessonId) {
+    return { lessonIndex, totalLessons, nextLessonId: null, nextLessonEntryStepId: null, isBookComplete: true };
+  }
+
+  const nextLesson = await getLessonById(contentOwner, nextLessonId);
+  const nextLessonEntryStepId =
+    typeof (nextLesson as { entryStepId?: unknown } | null)?.entryStepId === "string"
+      ? (nextLesson as { entryStepId: string }).entryStepId
+      : null;
+
+  return { lessonIndex, totalLessons, nextLessonId, nextLessonEntryStepId, isBookComplete: false };
+}
+
 export const playbackRouter = express.Router();
 
 // ─── Step CRUD ────────────────────────────────────────────────────────────────
@@ -278,6 +326,8 @@ playbackRouter.get("/:stepId/playback", async (req: Req, res: Res) => {
       ? (lesson.stepIds as string[]).filter((id): id is string => typeof id === "string")
       : [stepId];
 
+    const lessonNav = await resolveLessonNav(contentOwner, book, stepLessonId, stepId, orderedStepIds);
+
     const payloadBuildStartedAt = Date.now();
     const payload = buildPlaybackPayload({
       step,
@@ -285,6 +335,7 @@ playbackRouter.get("/:stepId/playback", async (req: Req, res: Res) => {
       language: requestedLanguage,
       lessonId: stepLessonId,
       bookId: stepBookId,
+      ...lessonNav,
     });
     buildPayloadMs = msSince(payloadBuildStartedAt);
     responseBytes = safeJsonBytes(payload);
@@ -403,6 +454,8 @@ playbackRouter.get(
         ? (lesson.stepIds as string[]).filter((id): id is string => typeof id === "string")
         : [stepId];
 
+      const lessonNav = await resolveLessonNav(contentOwner, book, lessonId, stepId, orderedStepIds);
+
       const payloadBuildStartedAt = Date.now();
       const payload = buildPlaybackPayload({
         step,
@@ -410,6 +463,7 @@ playbackRouter.get(
         language: requestedLanguage,
         lessonId,
         bookId,
+        ...lessonNav,
       });
       buildPayloadMs = msSince(payloadBuildStartedAt);
       responseBytes = safeJsonBytes(payload);
