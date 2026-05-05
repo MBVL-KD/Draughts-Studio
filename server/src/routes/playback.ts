@@ -160,10 +160,13 @@ async function resolveLessonNav(
   }
 
   const nextLesson = await getLessonById(contentOwner, nextLessonId);
+  const nl = nextLesson as { entryStepId?: unknown; stepIds?: unknown } | null;
   const nextLessonEntryStepId =
-    typeof (nextLesson as { entryStepId?: unknown } | null)?.entryStepId === "string"
-      ? (nextLesson as { entryStepId: string }).entryStepId
-      : null;
+    (typeof nl?.entryStepId === "string" && nl.entryStepId.trim()
+      ? nl.entryStepId.trim()
+      : Array.isArray(nl?.stepIds)
+        ? ((nl.stepIds as unknown[]).find((id): id is string => typeof id === "string" && id.trim().length > 0) ?? null)
+        : null);
 
   return { lessonIndex, totalLessons, nextLessonId, nextLessonEntryStepId, isBookComplete: false };
 }
