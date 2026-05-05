@@ -78,6 +78,7 @@ async function translateViaApi(
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(8000),
     });
     if (!response.ok) return null;
     const data = (await response.json()) as { translatedText?: string };
@@ -116,6 +117,7 @@ async function translateViaOpenAI(
           { role: "user", content: userPrompt },
         ],
       }),
+      signal: AbortSignal.timeout(15000),
     });
     if (!response.ok) return null;
     const data = (await response.json()) as {
@@ -143,23 +145,36 @@ export function isBlankLocalized(value: unknown): boolean {
   return typeof value !== "string" || value.trim().length === 0;
 }
 
-export type LocalizedValues = { values: Record<string, string> };
+/** Always overwrites EN from NL, regardless of current EN value. NL is the authoritative language. */
+export async function overwriteEnFromNl(
+  localized: { values: Record<string, string> }
+): Promise<{ changed: boolean; filledEn: number; apiTranslated: number; fallbackTranslated: number }> {
+  const nl = typeof localized.values.nl === "string" ? localized.values.nl : "";
+  if (isBlankLocalized(nl)) return { changed: false, filledEn: 0, apiTranslated: 0, fallbackTranslated: 0 };
+  const from = normalizeSpace(nl);
+  const apiText = await translateViaProvider(from, "nl", "en");
+  localized.values.en = apiText || smartTranslate(from, "nlToEn");
+  return { changed: true, filledEn: 1, apiTranslated: apiText ? 1 : 0, fallbackTranslated: apiText ? 0 : 1 };
+}
 
-export function ensureLocalizedObject(value: unknown): LocalizedValues {
-  if (
-    value &&
-    typeof value === "object" &&
-    "values" in value &&
-    typeof (value as { values?: unknown }).values === "object" &&
-    (value as { values?: unknown }).values !== null
-  ) {
-    return { values: { ...((value as { values: Record<string, string> }).values ?? {}) } };
-  }
-  return { values: {} };
+/**
+ * Placeholder values the client treats as "missing" even though they are non-empty strings.
+ * Must stay in sync with the client's `isBlank` placeholder set in findMissingLocalizedTexts.ts.
+ */
+const PLACEHOLDER_VALUES = new Set([
+  "new book", "new lesson", "new step", "coach text",
+  "intro", "checkpoint", "option a", "option b",
+  "your turn.", "correct.", "try again.", "banner", "hint",
+]);
+
+function isEffectivelyBlank(value: string): boolean {
+  if (!value.trim()) return true;
+  return PLACEHOLDER_VALUES.has(value.trim().toLowerCase());
 }
 
 export async function fillMissingEnNlPair(
-  localized: LocalizedValues
+  localized: { values: Record<string, string> },
+  clientMissing?: string[]
 ): Promise<{
   changed: boolean;
   filledEn: number;
@@ -175,7 +190,12 @@ export async function fillMissingEnNlPair(
   let apiTranslated = 0;
   let fallbackTranslated = 0;
 
-  if (isBlankLocalized(en) && !isBlankLocalized(nl)) {
+  // Trust the client's missing array: if client says EN is missing, treat it as blank
+  // even if it contains a placeholder value like "Intro" or "Your turn."
+  const enMissing = clientMissing?.includes("en") ? true : isEffectivelyBlank(en);
+  const nlMissing = clientMissing?.includes("nl") ? true : isEffectivelyBlank(nl);
+
+  if (enMissing && !isBlankLocalized(nl)) {
     const from = normalizeSpace(nl);
     const apiText = await translateViaProvider(from, "nl", "en");
     localized.values.en = apiText || smartTranslate(from, "nlToEn");
@@ -185,7 +205,7 @@ export async function fillMissingEnNlPair(
     else fallbackTranslated = 1;
   }
 
-  if (isBlankLocalized(nl) && !isBlankLocalized(en)) {
+  if (nlMissing && !isBlankLocalized(en) && !enMissing) {
     const from = normalizeSpace(en);
     const apiText = await translateViaProvider(from, "en", "nl");
     localized.values.nl = apiText || smartTranslate(from, "enToNl");

@@ -233,6 +233,7 @@ booksRouter.post("/:bookId/i18n/fill-missing-export", async (req: Req, res: Res)
       expectedRevision: req.body.expectedRevision,
       entries: req.body.entries,
       dryRun: req.body.dryRun === true,
+      mode: req.body.mode === "nl_to_en_overwrite" ? "nl_to_en_overwrite" : "fill_missing",
     });
     res.json({ item });
   } catch (error) {

@@ -1,6 +1,7 @@
 import { getBookById, patchBook } from "../repositories/bookRepository";
 import { NotFoundError, ValidationError } from "../utils/httpErrors";
-import { ensureLocalizedObject, fillMissingEnNlPair } from "../utils/translateProvider";
+import { fillMissingEnNlPair, overwriteEnFromNl } from "../utils/translateProvider";
+import { isLocalizedObject, readByPath, setLocalizedAtPath, toLocalizedValues } from "../utils/i18nPathUtils";
 
 type OwnerContext = {
   ownerType: "user" | "school" | "org";
@@ -25,11 +26,9 @@ export type FillBookMissingI18nResult = {
   apiTranslatedCount: number;
   fallbackTranslatedCount: number;
   book?: Record<string, unknown>;
+  /** Translated patches for the client to apply to the in-memory book (includes lesson/step paths). */
+  translatedPatches?: Array<{ path: string; values: Record<string, string> }>;
 };
-
-function stripBookRootPrefix(path: string): string {
-  return path.startsWith("book.") ? path.slice("book.".length) : path;
-}
 
 function assertSafeI18nPath(path: string) {
   if (typeof path !== "string" || path.length === 0 || path.length > 800) {
@@ -62,53 +61,6 @@ function assertSafeI18nPath(path: string) {
       },
     ]);
   }
-}
-
-function tokenizePath(path: string): Array<string | number> {
-  const tokens: Array<string | number> = [];
-  const regex = /([^[.\]]+)|\[(\d+)\]/g;
-  let match: RegExpExecArray | null;
-  while ((match = regex.exec(path))) {
-    if (match[1]) tokens.push(match[1]);
-    else if (match[2]) tokens.push(Number(match[2]));
-  }
-  return tokens;
-}
-
-function readByPath(root: unknown, path: string): unknown {
-  const effective = stripBookRootPrefix(path);
-  let cursor: unknown = root;
-  for (const token of tokenizePath(effective)) {
-    if (typeof token === "number") {
-      if (!Array.isArray(cursor)) return undefined;
-      cursor = cursor[token];
-      continue;
-    }
-    if (!cursor || typeof cursor !== "object") return undefined;
-    cursor = (cursor as Record<string, unknown>)[token];
-  }
-  return cursor;
-}
-
-function setLocalizedAtPath(root: unknown, path: string, localized: { values: Record<string, string> }) {
-  const effective = stripBookRootPrefix(path);
-  const tokens = tokenizePath(effective);
-  if (tokens.length === 0) return;
-  let cursor: unknown = root;
-  for (let index = 0; index < tokens.length - 1; index += 1) {
-    const token = tokens[index];
-    if (typeof token === "number") {
-      if (!Array.isArray(cursor) || token < 0 || token >= cursor.length) return;
-      cursor = cursor[token];
-      continue;
-    }
-    if (!cursor || typeof cursor !== "object") return;
-    cursor = (cursor as Record<string, unknown>)[token];
-  }
-  const last = tokens[tokens.length - 1];
-  if (typeof last === "number") return;
-  if (!cursor || typeof cursor !== "object") return;
-  (cursor as Record<string, unknown>)[last] = localized;
 }
 
 function parseEntries(raw: unknown): MissingI18nExportEntry[] {
@@ -160,9 +112,11 @@ export async function fillBookMissingI18nFromExport(
     expectedRevision: number;
     entries: unknown;
     dryRun?: boolean;
+    mode?: "fill_missing" | "nl_to_en_overwrite";
   }
 ): Promise<FillBookMissingI18nResult> {
   const dryRun = body.dryRun === true;
+  const mode = body.mode === "nl_to_en_overwrite" ? "nl_to_en_overwrite" : "fill_missing";
   if (!Number.isFinite(body.expectedRevision)) {
     throw new ValidationError("Invalid request body", [
       {
@@ -186,12 +140,33 @@ export async function fillBookMissingI18nFromExport(
   let filledNlCount = 0;
   let apiTranslatedCount = 0;
   let fallbackTranslatedCount = 0;
+  const translatedPatches: Array<{ path: string; values: Record<string, string> }> = [];
 
   for (const entry of entries) {
     assertSafeI18nPath(entry.path);
     const current = readByPath(working, entry.path);
-    const localized = ensureLocalizedObject(current);
-    const fillResult = await fillMissingEnNlPair(localized);
+
+    // Use the path-resolved value when it's a proper localized object.
+    // For lesson/step paths the book document has no embedded lessons, so readByPath
+    // returns undefined — fall back to entry.existing (sent by the client) as the source.
+    const isLocalizedInDoc = isLocalizedObject(current);
+
+    let localized: { values: Record<string, string> };
+    if (isLocalizedInDoc) {
+      localized = toLocalizedValues(current);
+    } else if (entry.existing && typeof entry.existing === "object") {
+      localized = { values: { ...(entry.existing as Record<string, string>) } };
+    } else {
+      pathsSkippedNoSource += 1;
+      continue;
+    }
+
+    let fillResult: { changed: boolean; filledEn: number; filledNl?: number; apiTranslated: number; fallbackTranslated: number };
+    if (mode === "nl_to_en_overwrite") {
+      fillResult = await overwriteEnFromNl(localized);
+    } else {
+      fillResult = await fillMissingEnNlPair(localized, entry.missing);
+    }
 
     if (!fillResult.changed) {
       if (entry.missing.length > 0) pathsSkippedNoSource += 1;
@@ -200,11 +175,17 @@ export async function fillBookMissingI18nFromExport(
 
     pathsProcessed += 1;
     filledEnCount += fillResult.filledEn;
-    filledNlCount += fillResult.filledNl;
+    filledNlCount += fillResult.filledNl ?? 0;
     apiTranslatedCount += fillResult.apiTranslated;
     fallbackTranslatedCount += fillResult.fallbackTranslated;
 
-    setLocalizedAtPath(working, entry.path, localized);
+    // Always collect as client patch (client applies to in-memory book for lesson/step paths).
+    translatedPatches.push({ path: entry.path, values: { ...localized.values } });
+
+    // Also write into the working book doc for paths that resolved (book-level fields).
+    if (isLocalizedInDoc) {
+      setLocalizedAtPath(working, entry.path, localized);
+    }
   }
 
   if (dryRun) {
@@ -219,6 +200,7 @@ export async function fillBookMissingI18nFromExport(
       filledNlCount,
       apiTranslatedCount,
       fallbackTranslatedCount,
+      translatedPatches,
     };
   }
 
@@ -240,6 +222,7 @@ export async function fillBookMissingI18nFromExport(
     filledNlCount,
     apiTranslatedCount,
     fallbackTranslatedCount,
+    translatedPatches,
     book: updated,
   };
 }

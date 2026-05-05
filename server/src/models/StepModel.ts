@@ -35,7 +35,7 @@ const StepSchema = new Schema(
 
 StepSchema.index({ ownerType: 1, ownerId: 1, stepId: 1 }, { unique: true });
 StepSchema.index({ ownerType: 1, ownerId: 1, lessonId: 1, orderIndex: 1 });
-StepSchema.index({ ownerType: 1, ownerId: 1, bookId: 1 });
+StepSchema.index({ ownerType: 1, ownerId: 1, bookId: 1, orderIndex: 1 });
 StepSchema.index({ ownerType: 1, ownerId: 1, isDeleted: 1 });
 
 export type StepDoc = InferSchemaType<typeof StepSchema>;

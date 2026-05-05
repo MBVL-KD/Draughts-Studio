@@ -83,7 +83,7 @@ async function choosePuzzelsBook(owner: OwnerContext): Promise<Record<string, un
     if (steps < MAX_STEPS_PER_BOOK) return book;
   }
 
-  const nextSeq = maxSequenceIndex(books) + 1;
+  const nextSeq = Math.max(9000, maxSequenceIndex(books) + 1);
   const suffix = books.length >= 1 ? ` ${books.length + 1}` : "";
   const bookId = randomUUID();
   const created = await createBook(owner, {
